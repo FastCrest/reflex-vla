@@ -164,6 +164,51 @@ def benchmark_cmd(
 
 
 @app.command()
+def serve(
+    export_dir: str = typer.Argument(help="Path to exported model directory"),
+    port: int = typer.Option(8000, help="Server port"),
+    host: str = typer.Option("0.0.0.0", help="Server host"),
+    device: str = typer.Option("cuda", help="Device: cuda or cpu"),
+    verbose: bool = typer.Option(False, help="Verbose logging"),
+):
+    """Start a VLA inference server. POST /act with image + instruction → actions."""
+    _setup_logging(verbose)
+
+    export_path = Path(export_dir)
+    if not export_path.exists():
+        console.print(f"[red]Export directory not found: {export_dir}[/red]")
+        console.print(f"[dim]Run 'reflex export' first to create an export.[/dim]")
+        raise typer.Exit(1)
+
+    onnx_files = list(export_path.glob("*.onnx"))
+    if not onnx_files:
+        console.print(f"[red]No ONNX files found in {export_dir}[/red]")
+        raise typer.Exit(1)
+
+    console.print(f"\n[bold]Reflex Serve[/bold]")
+    console.print(f"  Export:  {export_dir}")
+    console.print(f"  Device:  {device}")
+    console.print(f"  Server:  http://{host}:{port}")
+    console.print()
+    console.print(f"  [dim]Endpoints:[/dim]")
+    console.print(f"  [cyan]POST /act[/cyan]     — send image + instruction, get actions")
+    console.print(f"  [cyan]GET  /health[/cyan]  — check server status")
+    console.print(f"  [cyan]GET  /config[/cyan]  — view model config")
+    console.print()
+
+    try:
+        from reflex.runtime.server import create_app
+        import uvicorn
+    except ImportError:
+        console.print("[red]Install serve dependencies: pip install 'reflex-vla[serve]'[/red]")
+        raise typer.Exit(1)
+
+    app_instance = create_app(export_dir, device=device)
+    console.print("[bold green]Starting server...[/bold green]")
+    uvicorn.run(app_instance, host=host, port=port, log_level="info" if verbose else "warning")
+
+
+@app.command()
 def targets():
     """List supported hardware targets."""
     table = Table(title="Supported Hardware Targets")

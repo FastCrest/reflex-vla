@@ -30,3 +30,14 @@ def test_export_help():
     result = runner.invoke(app, ["export", "--help"])
     assert result.exit_code == 0
     assert "HuggingFace model ID" in result.output
+
+
+def test_serve_help():
+    result = runner.invoke(app, ["serve", "--help"])
+    assert result.exit_code == 0
+    assert "inference server" in result.output.lower() or "POST /act" in result.output
+
+
+def test_serve_missing_dir():
+    result = runner.invoke(app, ["serve", "/nonexistent/path"])
+    assert result.exit_code == 1

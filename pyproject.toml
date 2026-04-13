@@ -32,8 +32,9 @@ dependencies = [
 [project.optional-dependencies]
 onnx = ["onnx>=1.15.0", "onnxruntime>=1.17.0"]
 # tensorrt = ["tensorrt>=10.0"]  # install on Linux/Jetson only: pip install tensorrt
+serve = ["fastapi>=0.100.0", "uvicorn>=0.23.0", "Pillow>=10.0.0"]
 safety = ["yourdfpy"]
-dev = ["pytest>=8.0", "ruff>=0.4.0", "mypy>=1.10"]
+dev = ["pytest>=8.0", "ruff>=0.4.0", "mypy>=1.10", "httpx>=0.24.0"]
 
 [project.scripts]
 reflex = "reflex.cli:app"
