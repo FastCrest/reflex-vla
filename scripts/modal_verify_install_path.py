@@ -120,9 +120,12 @@ def test_fresh_install():
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             return resp.status, _json.loads(resp.read().decode())
 
+    # 240s — server now does a warmup pass during lifespan startup. With TRT
+    # EP enabled, the first denoising loop also builds + caches a TRT engine,
+    # which can take 30-90s for our smallest model and longer for pi0/gr00t.
     ready = False
     t0 = time.time()
-    while time.time() - t0 < 90:
+    while time.time() - t0 < 240:
         if serve.poll() is not None:
             break
         try:

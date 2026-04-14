@@ -701,6 +701,27 @@ def create_app(
     @asynccontextmanager
     async def lifespan(app):
         server.load()
+        # Warm up: run one inference so any lazy-build (TRT engine build,
+        # ORT graph optimization passes) happens before users hit /act.
+        # Without this, the first /act request takes 30-90s with TRT EP enabled
+        # because TRT builds + caches an engine on first call.
+        try:
+            logger.info("Warming up — running one denoising loop to JIT the engine...")
+            import time as _t
+            _t0 = _t.perf_counter()
+            warmup_result = server.predict()
+            _elapsed = (_t.perf_counter() - _t0) * 1000
+            if "error" in warmup_result:
+                logger.warning("Warmup returned error: %s", warmup_result["error"])
+            else:
+                logger.info(
+                    "Warmup complete in %.0fms (mode=%s). Subsequent /act calls "
+                    "will use the cached TRT engine if applicable.",
+                    _elapsed, warmup_result.get("inference_mode", "?"),
+                )
+        except Exception as e:
+            logger.warning("Warmup failed (server still up): %s", e)
+
         await server.start_batch_worker()
         try:
             yield
