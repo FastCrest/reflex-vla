@@ -46,6 +46,7 @@ def benchmark_all():
         ("smolvla", "lerobot/smolvla_base"),
         ("pi0", "lerobot/pi0_base"),
         ("pi05", "lerobot/pi05_base"),
+        ("gr00t", "nvidia/GR00T-N1.6-3B"),
     ]
 
     results = {}

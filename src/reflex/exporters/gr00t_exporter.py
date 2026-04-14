@@ -451,6 +451,14 @@ def export_gr00t(
         except RuntimeError as e:
             logger.warning("TRT build failed: %s", e)
 
+    # For serve-path compatibility: reflex serve samples noise of shape
+    # [b, chunk, action_dim] and pipes it to the ONNX. GR00T's expert accepts
+    # action-token input (pre-encoded, `hidden`-dim) rather than raw actions,
+    # so we surface `action_dim=hidden` at top-level for the server to allocate.
+    # The `output_dim` field records the real post-expert dim (1024) for
+    # downstream action_decoder usage.
+    meta_with_action_dim = dict(meta)
+    meta_with_action_dim["action_dim"] = hidden  # server uses this to shape input
     export_config = {
         "model_id": config.model_id,
         "model_type": "gr00t",
@@ -459,15 +467,18 @@ def export_gr00t(
         "opset": config.opset,
         "num_denoising_steps": 4,  # GR00T config says 4 inference steps
         "action_chunk_size": chunk_size,
+        "action_dim": hidden,  # action-token dim (not native DoF)
         "hidden": hidden,
         "output_dim": meta["output_dim"],
+        "note": "expert accepts action tokens (hidden-dim), emits velocity tokens (output_dim). "
+                "action_decoder (per-embodiment) needed downstream to recover native actions.",
         "hardware": {
             "name": hardware.name,
             "memory_gb": hardware.memory_gb,
             "fp8": hardware.fp8_support,
             "precision": hardware.trt_precision,
         },
-        "expert": meta,
+        "expert": meta_with_action_dim,
     }
     config_path = output_dir / "reflex_config.json"
     config_path.write_text(json.dumps(export_config, indent=2))
