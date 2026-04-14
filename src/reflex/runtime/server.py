@@ -214,7 +214,19 @@ class ReflexServer:
             # Prefer TensorRT EP when available — gives FP16 kernels and
             # engine caching transparently. ORT falls back to CUDA EP for
             # ops the TRT EP doesn't support.
-            if "TensorrtExecutionProvider" in available:
+            #
+            # CRITICAL: TRT EP is incompatible with continuous batching when
+            # the source ONNX has static shapes (which our exporters bake).
+            # Apr-14 verification showed TRT rebuilds the engine on each new
+            # batch shape, causing 34-second latencies instead of milliseconds.
+            # When max_batch > 1, fall through to CUDAExecutionProvider which
+            # handles dynamic shapes natively and gives the 2.88x batching
+            # speedup measured in Phase III.
+            use_trt_ep = (
+                "TensorrtExecutionProvider" in available
+                and self._max_batch <= 1
+            )
+            if use_trt_ep:
                 # Use a per-export-dir engine cache so subsequent serve calls
                 # skip the engine-build cost.
                 trt_cache = str(self.export_dir / ".trt_cache")
@@ -229,6 +241,15 @@ class ReflexServer:
                         "trt_max_workspace_size": 4 * 1024 * 1024 * 1024,  # 4GB
                     },
                 ))
+            elif "TensorrtExecutionProvider" in available and self._max_batch > 1:
+                logger.info(
+                    "TRT EP available but disabled because --max-batch=%d > 1. "
+                    "TRT EP rebuilds engines per batch shape on static-shape "
+                    "ONNX, causing 34s+ latencies. Using CUDAExecutionProvider "
+                    "which handles dynamic batch natively. (Re-export with "
+                    "dynamic batch shapes + TRT shape profiles is a v0.2 fix.)",
+                    self._max_batch,
+                )
             providers.append("CUDAExecutionProvider")
             providers.append("CPUExecutionProvider")
         else:
