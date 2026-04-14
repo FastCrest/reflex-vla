@@ -30,7 +30,16 @@ Modal A10G benchmark (closest cloud GPU to Jetson Orin Ampere). Per single denoi
 | pi0.5 | 426.9M | 7.34 | 7.37 | **2.24** | 3.3× |
 | GR00T N1.6 | 1091.7M | 14.61 | 14.45 | **5.59** | 2.6× |
 
-Per chunk (10 denoising steps), the TRT FP16 numbers translate to **18-105 Hz on A10G** depending on model size — comfortably above the 20-30 Hz typically wanted for real-time robot control. Same ONNX → TRT pipeline runs on Jetson, no separate cloud vs edge model variant.
+End-to-end via `reflex bench` (full 10-step denoise loop, what users actually get):
+
+| Model | per-chunk | effective Hz |
+|---|---|---|
+| SmolVLA | 11.7 ms | 86 Hz |
+| pi0 | 23.6 ms | 42 Hz |
+| pi0.5 | 27.1 ms | 37 Hz |
+| GR00T | 56.6 ms | 18 Hz |
+
+SmolVLA / pi0 / pi0.5 sit comfortably above 20-30 Hz robot-control targets. GR00T at 18 Hz is borderline. Same ONNX → TRT pipeline runs on Jetson — no separate cloud vs edge model variant.
 
 For fleet operators: `reflex serve --max-batch N` does continuous HTTP batching. With pi0 on A10G and 32 concurrent /act requests, throughput scales 2.34× at batch=4, 2.73× at batch=8, 2.88× at batch=16. Per-request latency drops too because requests no longer serialize through the model.
 

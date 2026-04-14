@@ -120,16 +120,22 @@ Per-denoising-step latency on Modal A10G (the closest cloud GPU to Jetson Orin's
 
 Reflex's TensorRT FP16 path beats `torch.compile` by 2.6-3.3× on cloud GPU, and the same ONNX → TRT pipeline is what runs on Jetson — there is no "cloud version" vs "edge version" of the model.
 
-Per-chunk (10 denoising steps):
+Per-chunk wall-clock from `reflex bench` (full 10-step denoise loop, end-to-end including Python — what users experience):
 
-| Model | TRT FP16 wall-clock | Effective Hz |
+| Model | Per-chunk | Effective Hz |
 |---|---|---|
-| SmolVLA | 9.5 ms | 105 Hz |
-| pi0 | 19.4 ms | 52 Hz |
-| pi0.5 | 22.4 ms | 45 Hz |
-| GR00T N1.6 | 55.9 ms | 18 Hz |
+| SmolVLA | 11.7 ms | **86 Hz** |
+| pi0 | 23.6 ms | **42 Hz** |
+| pi0.5 | 27.1 ms | **37 Hz** |
+| GR00T N1.6 | 56.6 ms | **18 Hz** |
 
-All four sit comfortably above the 20-30 Hz needed for real-time robot control on A10G. Real Jetson Orin Nano numbers landing in a follow-up.
+SmolVLA, pi0, and pi0.5 sit comfortably above the 20-30 Hz needed for real-time robot control on A10G. GR00T at 18 Hz is borderline and gets distilled / step-skipped for higher rates. Real Jetson Orin Nano numbers landing in a follow-up.
+
+Reproduce on your own GPU with one command:
+
+```bash
+reflex bench ./pi0 --iterations 100
+```
 
 ### Multi-robot batching (`reflex serve --max-batch N`)
 
