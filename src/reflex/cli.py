@@ -305,5 +305,36 @@ def targets():
     console.print(table)
 
 
+@app.command()
+def models():
+    """List supported VLA models and their export status."""
+    from reflex.checkpoint import SUPPORTED_MODELS
+
+    table = Table(title="Supported VLA Models")
+    table.add_column("Type", style="cyan")
+    table.add_column("HF ID")
+    table.add_column("Params")
+    table.add_column("Action head")
+    table.add_column("Export")
+
+    status_map = {
+        "smolvla": "[green]✓ ONNX + validated[/green]",
+        "pi0": "[green]✓ ONNX + validated[/green]",
+        "pi05": "[green]✓ ONNX + AdaRMSNorm[/green]",
+    }
+
+    for key, info in SUPPORTED_MODELS.items():
+        table.add_row(
+            key,
+            info["hf_id"],
+            f"{info['params_m']}M",
+            info["action_head"],
+            status_map.get(key, "[yellow]planned[/yellow]"),
+        )
+
+    console.print(table)
+    console.print("\n[dim]Usage:[/dim] [cyan]reflex export <hf_id>[/cyan] — auto-detects model type.")
+
+
 if __name__ == "__main__":
     app()
