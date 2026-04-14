@@ -124,7 +124,10 @@ def export(
     import time
     start = time.perf_counter()
     if model_type == "gr00t":
-        result = export_gr00t(export_config, state_dict=state_dict)
+        # Use the full-stack exporter (wraps action_encoder + DiT + action_decoder)
+        # so `reflex serve` can run the standard denoising loop.
+        from reflex.exporters.gr00t_exporter import export_gr00t_full
+        result = export_gr00t_full(export_config, state_dict=state_dict)
     elif model_type == "openvla":
         from reflex.exporters.openvla_exporter import export_openvla
         result = export_openvla(export_config, state_dict=state_dict)

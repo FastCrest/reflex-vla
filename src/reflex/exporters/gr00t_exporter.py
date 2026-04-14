@@ -54,6 +54,18 @@ GR00T_META_KEYS = {
     "pos_embed": "action_head.position_embedding.weight",
     "vlln_w": "action_head.vlln.weight",
     "vlln_b": "action_head.vlln.bias",
+    # Per-embodiment action encoder (leading dim 32)
+    "action_enc_W1_W": "action_head.action_encoder.W1.W",
+    "action_enc_W1_b": "action_head.action_encoder.W1.b",
+    "action_enc_W2_W": "action_head.action_encoder.W2.W",
+    "action_enc_W2_b": "action_head.action_encoder.W2.b",
+    "action_enc_W3_W": "action_head.action_encoder.W3.W",
+    "action_enc_W3_b": "action_head.action_encoder.W3.b",
+    # Per-embodiment action decoder (leading dim 32)
+    "action_dec_1_W": "action_head.action_decoder.layer1.W",
+    "action_dec_1_b": "action_head.action_decoder.layer1.b",
+    "action_dec_2_W": "action_head.action_decoder.layer2.W",
+    "action_dec_2_b": "action_head.action_decoder.layer2.b",
 }
 
 
@@ -472,6 +484,264 @@ def export_gr00t(
         "output_dim": meta["output_dim"],
         "note": "expert accepts action tokens (hidden-dim), emits velocity tokens (output_dim). "
                 "action_decoder (per-embodiment) needed downstream to recover native actions.",
+        "hardware": {
+            "name": hardware.name,
+            "memory_gb": hardware.memory_gb,
+            "fp8": hardware.fp8_support,
+            "precision": hardware.trt_precision,
+        },
+        "expert": meta_with_action_dim,
+    }
+    config_path = output_dir / "reflex_config.json"
+    config_path.write_text(json.dumps(export_config, indent=2))
+    result["files"]["config"] = str(config_path)
+    return result
+
+
+# -------------------------------------------------------------------------
+# Full-stack variant: raw actions in, raw actions out.
+# Wraps the DiT expert with GR00T's action_encoder (3 linears) and
+# action_decoder (2 linears) pinned to a single embodiment_id.
+# -------------------------------------------------------------------------
+
+
+class GR00TActionEncoder(nn.Module):
+    """3-linear action token encoder, pinned to one embodiment.
+
+    Per-embodiment state_dict weights have shape:
+        W1.W [32, 128, 1536]    -- raw action (128) → hidden (1536)
+        W2.W [32, 3072, 1536]   -- cat(h1, time_emb) → hidden (3072→1536)
+        W3.W [32, 1536, 1536]   -- residual projection
+
+    Input convention is [embodiment, in, out] so each slice is [in, out] and
+    F.linear needs transpose at call time.
+    """
+
+    def __init__(self, raw_action_dim: int, hidden: int, weights: dict,
+                 embodiment_id: int = 0):
+        super().__init__()
+        self.raw_action_dim = raw_action_dim
+        self.hidden = hidden
+
+        # Slice per embodiment and pre-transpose for F.linear
+        self.register_buffer("W1_w", weights["W1_W"][embodiment_id].T.contiguous())
+        self.register_buffer("W1_b", weights["W1_b"][embodiment_id].clone())
+        self.register_buffer("W2_w", weights["W2_W"][embodiment_id].T.contiguous())
+        self.register_buffer("W2_b", weights["W2_b"][embodiment_id].clone())
+        self.register_buffer("W3_w", weights["W3_W"][embodiment_id].T.contiguous())
+        self.register_buffer("W3_b", weights["W3_b"][embodiment_id].clone())
+
+    def forward(self, actions: torch.Tensor, time_emb: torch.Tensor) -> torch.Tensor:
+        # actions: [b, chunk, raw_action_dim], time_emb: [b, hidden]
+        b, chunk, _ = actions.shape
+
+        h1 = F.silu(F.linear(actions, self.W1_w, self.W1_b))  # [b, chunk, hidden]
+
+        t = time_emb.unsqueeze(1).expand(-1, chunk, -1)  # [b, chunk, hidden]
+        cat = torch.cat([h1, t], dim=-1)                 # [b, chunk, 2*hidden]
+        h2 = F.silu(F.linear(cat, self.W2_w, self.W2_b)) # [b, chunk, hidden]
+
+        out = F.linear(h2 + h1, self.W3_w, self.W3_b)    # residual + projection
+        return out
+
+
+class GR00TActionDecoder(nn.Module):
+    """2-linear action decoder, pinned to one embodiment.
+
+    Per-embodiment weights:
+        layer1.W [32, 1024, 1024]  -- velocity token projection
+        layer2.W [32, 1024, 128]   -- final → raw action dim
+    """
+
+    def __init__(self, in_dim: int, raw_action_dim: int, weights: dict,
+                 embodiment_id: int = 0):
+        super().__init__()
+        self.in_dim = in_dim
+        self.raw_action_dim = raw_action_dim
+
+        self.register_buffer("L1_w", weights["L1_W"][embodiment_id].T.contiguous())
+        self.register_buffer("L1_b", weights["L1_b"][embodiment_id].clone())
+        self.register_buffer("L2_w", weights["L2_W"][embodiment_id].T.contiguous())
+        self.register_buffer("L2_b", weights["L2_b"][embodiment_id].clone())
+
+    def forward(self, tokens: torch.Tensor) -> torch.Tensor:
+        # tokens: [b, chunk, in_dim=1024]
+        h = F.silu(F.linear(tokens, self.L1_w, self.L1_b))  # [b, chunk, 1024]
+        return F.linear(h, self.L2_w, self.L2_b)            # [b, chunk, raw_action_dim]
+
+
+class GR00TFullStack(nn.Module):
+    """End-to-end serve-compatible GR00T: raw actions → raw velocity.
+
+    Wraps the DiT expert stack with action_encoder (pre) and action_decoder
+    (post). Input and output shapes both [b, chunk, raw_action_dim], which
+    lets `reflex serve` run its standard flow-matching denoise loop.
+    """
+
+    def __init__(
+        self,
+        dit_stack: GR00TExpertStack,
+        action_encoder: GR00TActionEncoder,
+        action_decoder: GR00TActionDecoder,
+    ):
+        super().__init__()
+        self.dit = dit_stack
+        self.action_encoder = action_encoder
+        self.action_decoder = action_decoder
+
+    def forward(self, noisy_actions: torch.Tensor, timestep: torch.Tensor,
+                position_ids: torch.Tensor) -> torch.Tensor:
+        # Compute time embedding ONCE (encoder uses it, DiT recomputes internally)
+        t_sin = _sinusoidal_timestep(timestep, self.dit.sinusoidal_dim)
+        time_emb = self.dit.timestep_linear_2(F.silu(self.dit.timestep_linear_1(t_sin)))
+
+        # Encode → DiT → Decode
+        tokens = self.action_encoder(noisy_actions, time_emb)          # [b, chunk, 1536]
+        velocity_tokens = self.dit(tokens, timestep, position_ids)      # [b, chunk, 1024]
+        velocity_raw = self.action_decoder(velocity_tokens)             # [b, chunk, 128]
+        return velocity_raw
+
+
+def build_gr00t_full_stack(
+    state_dict: dict[str, torch.Tensor],
+    embodiment_id: int = 0,
+) -> tuple[GR00TFullStack, dict]:
+    """Build the full raw-actions-in-out GR00T stack for serve compatibility."""
+    dit, dit_meta = build_gr00t_expert_stack(state_dict, embodiment_id)
+
+    # Encoder weights (cast to fp32 up-front — state_dict is bf16)
+    enc_weights = {
+        "W1_W": state_dict[GR00T_META_KEYS["action_enc_W1_W"]].float(),
+        "W1_b": state_dict[GR00T_META_KEYS["action_enc_W1_b"]].float(),
+        "W2_W": state_dict[GR00T_META_KEYS["action_enc_W2_W"]].float(),
+        "W2_b": state_dict[GR00T_META_KEYS["action_enc_W2_b"]].float(),
+        "W3_W": state_dict[GR00T_META_KEYS["action_enc_W3_W"]].float(),
+        "W3_b": state_dict[GR00T_META_KEYS["action_enc_W3_b"]].float(),
+    }
+    raw_action_dim = enc_weights["W1_W"].shape[1]   # [32, 128, 1536] → 128
+    hidden = enc_weights["W1_W"].shape[2]
+
+    action_encoder = GR00TActionEncoder(
+        raw_action_dim=raw_action_dim,
+        hidden=hidden,
+        weights=enc_weights,
+        embodiment_id=embodiment_id,
+    )
+
+    # Decoder weights
+    dec_weights = {
+        "L1_W": state_dict[GR00T_META_KEYS["action_dec_1_W"]].float(),
+        "L1_b": state_dict[GR00T_META_KEYS["action_dec_1_b"]].float(),
+        "L2_W": state_dict[GR00T_META_KEYS["action_dec_2_W"]].float(),
+        "L2_b": state_dict[GR00T_META_KEYS["action_dec_2_b"]].float(),
+    }
+    output_token_dim = dec_weights["L1_W"].shape[1]   # [32, 1024, 1024] → 1024
+
+    action_decoder = GR00TActionDecoder(
+        in_dim=output_token_dim,
+        raw_action_dim=raw_action_dim,
+        weights=dec_weights,
+        embodiment_id=embodiment_id,
+    )
+
+    full = GR00TFullStack(dit, action_encoder, action_decoder)
+    full = full.float()
+    full.eval()
+
+    meta = dict(dit_meta)
+    meta["raw_action_dim"] = raw_action_dim
+    meta["embodiment_id"] = embodiment_id
+    meta["full_stack_params_m"] = sum(p.numel() for p in full.parameters()) / 1e6
+    meta["full_stack_buffers_m"] = sum(p.numel() for p in full.buffers()) / 1e6
+    return full, meta
+
+
+def export_gr00t_full(
+    config: ExportConfig,
+    state_dict: dict[str, torch.Tensor] | None = None,
+    embodiment_id: int = 0,
+) -> dict[str, Any]:
+    """Full GR00T export — raw actions in, raw actions out.
+
+    Pinned to a single embodiment_id (default 0) since encoder/decoder weights
+    are per-embodiment. Use the default for mixed-embodiment checkpoints.
+    """
+    output_dir = Path(config.output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    hardware = get_hardware_profile(config.target)
+    result = {"status": "ok", "files": {}, "metadata": {}}
+
+    if state_dict is None:
+        logger.info("Loading GR00T checkpoint: %s", config.model_id)
+        state_dict, _ = load_checkpoint(config.model_id)
+
+    logger.info("Building GR00T full stack (embodiment=%d)...", embodiment_id)
+    full, meta = build_gr00t_full_stack(state_dict, embodiment_id=embodiment_id)
+    result["metadata"]["expert"] = meta
+
+    chunk_size = 50
+    raw_action_dim = meta["raw_action_dim"]
+    dummy_actions = torch.randn(1, chunk_size, raw_action_dim)
+    dummy_time = torch.tensor([0.5])
+    dummy_pos = torch.arange(chunk_size).unsqueeze(0)
+
+    expert_onnx = output_dir / "expert_stack.onnx"
+    export_module_to_onnx(
+        full,
+        (dummy_actions, dummy_time, dummy_pos),
+        expert_onnx,
+        input_names=["noisy_actions", "timestep", "position_ids"],
+        output_names=["velocity"],
+        dynamic_axes={
+            "noisy_actions": {0: "batch"},
+            "timestep": {0: "batch"},
+            "position_ids": {0: "batch"},
+        },
+        opset_version=config.opset,
+    )
+    optimize_onnx(expert_onnx)
+    result["files"]["expert_onnx"] = str(expert_onnx)
+
+    if config.validate:
+        try:
+            import onnxruntime as ort
+            import numpy as np
+            sess = ort.InferenceSession(str(expert_onnx))
+            ort_out = sess.run(None, {
+                "noisy_actions": dummy_actions.numpy(),
+                "timestep": dummy_time.numpy(),
+                "position_ids": dummy_pos.numpy().astype(np.int64),
+            })[0]
+            torch_out = full(dummy_actions, dummy_time, dummy_pos).detach().numpy()
+            max_diff = float(np.abs(ort_out - torch_out).max())
+            result["metadata"]["onnx_validation"] = {"max_diff": max_diff, "passed": max_diff < 0.01}
+            logger.info("ONNX validation: max_diff=%.2e (%s)", max_diff, "PASS" if max_diff < 0.01 else "FAIL")
+        except ImportError:
+            logger.warning("onnxruntime not installed, skipping validation")
+
+    if check_trtexec():
+        expert_trt = output_dir / "expert_stack.trt"
+        try:
+            build_engine(expert_onnx, expert_trt, hardware)
+            result["files"]["expert_trt"] = str(expert_trt)
+        except RuntimeError as e:
+            logger.warning("TRT build failed: %s", e)
+
+    meta_with_action_dim = dict(meta)
+    meta_with_action_dim["action_dim"] = raw_action_dim
+    export_config = {
+        "model_id": config.model_id,
+        "model_type": "gr00t",
+        "full_stack": True,
+        "embodiment_id": embodiment_id,
+        "target": config.target,
+        "precision": config.precision,
+        "opset": config.opset,
+        "num_denoising_steps": 4,
+        "action_chunk_size": chunk_size,
+        "action_dim": raw_action_dim,
+        "hidden": meta["hidden"],
+        "output_dim": raw_action_dim,  # now same as input (full stack)
         "hardware": {
             "name": hardware.name,
             "memory_gb": hardware.memory_gb,
