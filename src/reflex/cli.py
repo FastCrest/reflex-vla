@@ -93,7 +93,13 @@ def export(
         else:
             console.print(f"  [green]Model ({weight_gb:.1f}GB) fits on {hardware.name} ({hardware.memory_gb}GB)[/green]")
 
-        console.print("\n[green]Dry run complete. Export should work.[/green]")
+        if model_type == "pi05":
+            console.print("\n[yellow]pi0.5 uses AdaRMSNorm (time-conditioned) — full export not yet supported. "
+                          "Use pi0_base for now or wait for v0.2.[/yellow]")
+        elif model_type is None:
+            console.print("\n[yellow]Unknown model type — export may fail. Supported: smolvla, pi0.[/yellow]")
+        else:
+            console.print("\n[green]Dry run complete. Export should work.[/green]")
         raise typer.Exit()
 
     # Full export — auto-dispatch to the right exporter based on model type
