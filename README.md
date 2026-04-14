@@ -6,6 +6,8 @@ Cross-framework ONNX export, edge-first serving, composable runtime wedges (safe
 
 **Want a deeper walkthrough?** See [docs/getting_started.md](docs/getting_started.md) for a 30-min guide covering safety configs, fleet-mode batching, deadline enforcement, and common troubleshooting.
 
+**Something not working?** Run `reflex doctor` first — diagnoses install + GPU issues in one screen.
+
 ## Quickstart — 3 commands from zero to actions
 
 ```bash

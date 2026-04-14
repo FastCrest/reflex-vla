@@ -220,6 +220,14 @@ The `/act` endpoint is HTTP, so any sim that can do an HTTP POST works. MuJoCo +
 
 ## Troubleshooting
 
+**First thing to run when something is off:**
+
+```bash
+reflex doctor
+```
+
+Reports your Python / torch / ORT / TRT versions, which execution providers loaded, free disk, and the most common install-time gotchas. Often pinpoints the issue in one screen.
+
 ### `CUDAExecutionProvider not available`
 
 ORT 1.20+ requires CUDA 12.x + cuDNN 9.x. The pip-installed `nvidia-cudnn-cu12` wheel is missing `libcudnn_adv.so.9`. Easiest fix is the NVIDIA TensorRT container:
