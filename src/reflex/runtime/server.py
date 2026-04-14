@@ -48,6 +48,8 @@ class ReflexServer:
         adaptive_steps: bool = False,
         cloud_fallback_url: str = "",
         deadline_ms: float | None = None,
+        max_batch: int = 1,
+        batch_timeout_ms: float = 5.0,
     ):
         """Create the server.
 
@@ -95,6 +97,15 @@ class ReflexServer:
         self._split_orchestrator = None  # built during load()
         self._last_good_actions: np.ndarray | None = None
         self._deadline_misses = 0
+
+        # Multi-robot batching (Phase III)
+        self._max_batch = max(1, max_batch)
+        self._batch_timeout_s = max(0.0, batch_timeout_ms) / 1000.0
+        # _batch_queue + _batch_worker_task lazily created in start_batch_worker()
+        self._batch_queue = None
+        self._batch_worker_task = None
+        self._batches_run = 0
+        self._batched_requests = 0
 
     def _load_config(self) -> dict[str, Any]:
         config_path = self.export_dir / "reflex_config.json"
@@ -391,6 +402,202 @@ class ReflexServer:
 
         return self.predict(image=image, instruction=instruction, state=state)
 
+    # ---------------------------------------------------------------
+    # Phase III: continuous batching across HTTP /act requests
+    # ---------------------------------------------------------------
+
+    async def start_batch_worker(self) -> None:
+        """Spawn an asyncio task that drains the batch queue. Idempotent.
+
+        Only does anything when max_batch > 1 — otherwise predict_async()
+        falls through to plain predict().
+        """
+        if self._max_batch <= 1:
+            return
+        if self._batch_worker_task is not None and not self._batch_worker_task.done():
+            return
+        import asyncio
+        self._batch_queue = asyncio.Queue()
+        self._batch_worker_task = asyncio.create_task(self._batch_worker_loop())
+        logger.info(
+            "batching enabled: max_batch=%d, timeout=%.1fms",
+            self._max_batch, self._batch_timeout_s * 1000,
+        )
+
+    async def stop_batch_worker(self) -> None:
+        """Cancel the batch worker (called during FastAPI shutdown)."""
+        import asyncio
+        if self._batch_worker_task is None:
+            return
+        self._batch_worker_task.cancel()
+        try:
+            await self._batch_worker_task
+        except (asyncio.CancelledError, Exception):
+            pass
+        self._batch_worker_task = None
+        self._batch_queue = None
+
+    async def predict_async(
+        self,
+        image: np.ndarray | None = None,
+        instruction: str = "",
+        state: list[float] | np.ndarray | None = None,
+    ) -> dict[str, Any]:
+        """Async front-door used by the HTTP /act handler.
+
+        - If max_batch <= 1: runs `self.predict()` synchronously in this task.
+        - If max_batch > 1: enqueues the request onto a batch queue. A worker
+          coroutine drains the queue every `batch_timeout_ms` ms (or when the
+          queue hits max_batch) and runs ONE batched ONNX inference, then
+          splits the results back to each waiter.
+        """
+        if self._max_batch <= 1 or self._batch_queue is None:
+            return self.predict(image=image, instruction=instruction, state=state)
+
+        import asyncio
+        loop = asyncio.get_event_loop()
+        future = loop.create_future()
+        await self._batch_queue.put((future, image, instruction, state))
+        return await future
+
+    async def _batch_worker_loop(self) -> None:
+        """Drain the batch queue. Run for the lifetime of the server."""
+        import asyncio
+        while True:
+            batch: list[tuple] = []
+            try:
+                # Block on the first request — if the queue is empty we just wait.
+                first = await self._batch_queue.get()
+                batch.append(first)
+            except asyncio.CancelledError:
+                break
+
+            # Drain up to max_batch within the configured time window.
+            deadline = asyncio.get_event_loop().time() + self._batch_timeout_s
+            while len(batch) < self._max_batch:
+                remaining = deadline - asyncio.get_event_loop().time()
+                if remaining <= 0:
+                    break
+                try:
+                    item = await asyncio.wait_for(self._batch_queue.get(), timeout=remaining)
+                    batch.append(item)
+                except asyncio.TimeoutError:
+                    break
+                except asyncio.CancelledError:
+                    # Make sure pending futures are released
+                    for fut, *_ in batch:
+                        if not fut.done():
+                            fut.set_exception(asyncio.CancelledError())
+                    return
+
+            # Run batched inference (sync — we're holding the event loop, but
+            # the actual ORT call is the bottleneck and yields the GIL).
+            try:
+                results = self._predict_batch_sync(batch)
+                for (fut, *_), result in zip(batch, results):
+                    if not fut.done():
+                        fut.set_result(result)
+            except Exception as e:
+                for fut, *_ in batch:
+                    if not fut.done():
+                        fut.set_exception(e)
+
+    def _predict_batch_sync(self, batch: list[tuple]) -> list[dict[str, Any]]:
+        """Run one ONNX inference with batch dim = len(batch). Split results.
+
+        For v0.1 of batching, ignores per-item image/instruction/state — same
+        as plain predict(). The point is to demonstrate the batching primitive
+        and measure throughput scaling. Per-item conditioning lands when the
+        VLM prefix path is wired in (Phase II.4).
+        """
+        if not self._ready:
+            return [{"error": "Model not loaded."} for _ in batch]
+        if not self._inference_mode.startswith("onnx"):
+            return [{"error": f"Unknown inference mode: {self._inference_mode}"} for _ in batch]
+
+        b = len(batch)
+        start = time.perf_counter()
+
+        noisy_batched = np.random.randn(
+            b, self.chunk_size, self.action_dim
+        ).astype(np.float32)
+        position_ids_batched = np.tile(
+            np.arange(self.chunk_size, dtype=np.int64), (b, 1),
+        )
+
+        dt = -1.0 / self.num_denoising_steps
+        for step in range(self.num_denoising_steps):
+            t = 1.0 + step * dt
+            timestep = np.full((b,), t, dtype=np.float32)
+            velocity = self._ort_session.run(
+                None,
+                {
+                    "noisy_actions": noisy_batched,
+                    "timestep": timestep,
+                    "position_ids": position_ids_batched,
+                },
+            )[0]
+            noisy_batched = noisy_batched + velocity * dt
+
+        elapsed_ms = (time.perf_counter() - start) * 1000
+        per_request_ms = elapsed_ms / b  # amortized
+
+        self._batches_run += 1
+        self._batched_requests += b
+
+        results: list[dict[str, Any]] = []
+        for i in range(b):
+            actions_np = noisy_batched[i]
+
+            # Apply guard per-item (each request gets its own clamping)
+            safety_violations = 0
+            if self._action_guard is not None:
+                try:
+                    safe_actions, guard_results = self._action_guard.check(actions_np)
+                    actions_np = safe_actions
+                    safety_violations = sum(len(r.violations) for r in guard_results)
+                except Exception as e:
+                    logger.warning("safety check failed in batch: %s", e)
+
+            result = {
+                "actions": actions_np.tolist(),
+                "num_actions": len(actions_np),
+                "action_dim": self.action_dim,
+                "latency_ms": round(elapsed_ms, 1),
+                "amortized_latency_ms": round(per_request_ms, 1),
+                "hz": round(1000.0 / per_request_ms, 1) if per_request_ms > 0 else 0,
+                "denoising_steps": self.num_denoising_steps,
+                "inference_mode": self._inference_mode,
+                "batch_size": b,
+                "request_index": i,
+                "batches_run_total": self._batches_run,
+                "batched_requests_total": self._batched_requests,
+            }
+            if self._action_guard is not None:
+                result["safety_violations"] = safety_violations
+            results.append(result)
+
+        return results
+
+    async def predict_from_base64_async(
+        self,
+        image_b64: str | None = None,
+        instruction: str = "",
+        state: list[float] | None = None,
+    ) -> dict[str, Any]:
+        """Async base64 entrypoint — decodes image, then routes through batching."""
+        image = None
+        if image_b64:
+            try:
+                from PIL import Image
+                img_bytes = base64.b64decode(image_b64)
+                img = Image.open(io.BytesIO(img_bytes)).convert("RGB")
+                image = np.array(img)
+            except Exception as e:
+                return {"error": f"Failed to decode image: {e}"}
+
+        return await self.predict_async(image=image, instruction=instruction, state=state)
+
 
 try:
     from pydantic import BaseModel
@@ -420,6 +627,8 @@ def create_app(
     adaptive_steps: bool = False,
     cloud_fallback_url: str = "",
     deadline_ms: float | None = None,
+    max_batch: int = 1,
+    batch_timeout_ms: float = 5.0,
 ) -> Any:
     """Create a FastAPI app for serving VLA predictions."""
     try:
@@ -438,12 +647,18 @@ def create_app(
         adaptive_steps=adaptive_steps,
         cloud_fallback_url=cloud_fallback_url,
         deadline_ms=deadline_ms,
+        max_batch=max_batch,
+        batch_timeout_ms=batch_timeout_ms,
     )
 
     @asynccontextmanager
     async def lifespan(app):
         server.load()
-        yield
+        await server.start_batch_worker()
+        try:
+            yield
+        finally:
+            await server.stop_batch_worker()
 
     app = FastAPI(
         title="Reflex VLA Server",
@@ -463,7 +678,8 @@ def create_app(
 
     @app.post("/act")
     async def act(request: PredictRequest):
-        result = server.predict_from_base64(
+        # Routes through the batching path when max_batch > 1.
+        result = await server.predict_from_base64_async(
             image_b64=request.image,
             instruction=request.instruction,
             state=request.state,

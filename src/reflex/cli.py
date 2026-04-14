@@ -291,6 +291,19 @@ def serve(
              "returns the last-known-good action instead if inference exceeds "
              "the deadline. Deadline misses are logged and counted.",
     ),
+    max_batch: int = typer.Option(
+        1,
+        help="Multi-robot batching: serve up to N concurrent /act requests in "
+             "one batched ONNX inference. Default 1 (no batching). "
+             "Throughput-per-GPU scales sublinearly with batch size — typical "
+             "wins are 2-3x at batch=4-8 for transformer-style VLAs.",
+    ),
+    batch_timeout_ms: float = typer.Option(
+        5.0,
+        help="With --max-batch > 1, wait up to this many ms after the first "
+             "request before flushing the batch. Lower = lower per-request "
+             "latency; higher = better batching efficiency under bursty load.",
+    ),
     verbose: bool = typer.Option(False, help="Verbose logging"),
 ):
     """Start a VLA inference server. POST /act with image + instruction → actions.
@@ -354,6 +367,8 @@ def serve(
         composed.append(f"[cyan]cloud-fallback[/cyan]={cloud_fallback}")
     if deadline_ms > 0:
         composed.append(f"[cyan]deadline[/cyan]={deadline_ms:.0f}ms")
+    if max_batch > 1:
+        composed.append(f"[cyan]batch[/cyan]={max_batch}@{batch_timeout_ms:.0f}ms")
     if composed:
         console.print(f"  Wedges:  {' · '.join(composed)}")
 
@@ -392,6 +407,8 @@ def serve(
         adaptive_steps=adaptive_steps,
         cloud_fallback_url=cloud_fallback,
         deadline_ms=deadline_ms if deadline_ms > 0 else None,
+        max_batch=max_batch,
+        batch_timeout_ms=batch_timeout_ms,
     )
     console.print("[bold green]Starting server...[/bold green]")
     uvicorn.run(app_instance, host=host, port=port, log_level="info" if verbose else "warning")
