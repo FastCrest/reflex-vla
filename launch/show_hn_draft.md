@@ -31,6 +31,8 @@ Then `POST /act` returns 50-step action chunks at 18-105 Hz on A10G depending on
 
 I went into this thinking the moat was edge-only because torch.compile was crushing my early benchmarks. Turned out my onnxruntime-gpu was silently falling back to CPU due to a CUDA 12-vs-13 library mismatch. Once that was fixed, TRT FP16 wins by 2.6-3.3× across the board.
 
+There's also a continuous-batching server mode (`--max-batch N`) for fleet operators serving many robots through one GPU. With pi0 on A10G + 32 concurrent requests: 2.34× throughput at batch=4, 2.88× at batch=16.
+
 Honest about what's not done: the current ONNX export covers the action-expert denoising loop with random VLM conditioning. Wiring the VLM prefix encoder into the same graph is the next big milestone (~weeks of work, depending on tokenizer + image processor decomposition).
 
 Repo: https://github.com/rylinjames/reflex-vla

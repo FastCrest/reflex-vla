@@ -32,6 +32,8 @@ Modal A10G benchmark (closest cloud GPU to Jetson Orin Ampere). Per single denoi
 
 Per chunk (10 denoising steps), the TRT FP16 numbers translate to **18-105 Hz on A10G** depending on model size — comfortably above the 20-30 Hz typically wanted for real-time robot control. Same ONNX → TRT pipeline runs on Jetson, no separate cloud vs edge model variant.
 
+For fleet operators: `reflex serve --max-batch N` does continuous HTTP batching. With pi0 on A10G and 32 concurrent /act requests, throughput scales 2.34× at batch=4, 2.73× at batch=8, 2.88× at batch=16. Per-request latency drops too because requests no longer serialize through the model.
+
 Methodology + raw data + reproducer: https://github.com/rylinjames/vla_to_hardware_roadmap/blob/main/phase_1_vla_software/deployment_export/build_candidates.md
 
 ### How to try it

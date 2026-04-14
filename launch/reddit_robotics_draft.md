@@ -40,6 +40,8 @@ Then `POST /act` returns flow-matching action chunks. The composable wedges — 
 
 All above the 20-30 Hz typically needed for real-time robot control on the smaller models, and GR00T at 18 Hz is in striking distance.
 
+For multi-robot deployments, `reflex serve --max-batch N` does HTTP-layer continuous batching. With pi0 + 32 concurrent /act on A10G, throughput scales 2.88× at batch=16 with per-request latency actually dropping (no more serial queueing).
+
 **Honest disclaimers**:
 - Alpha software, single maintainer (me), Apache 2.0
 - The current ONNX covers the action-expert denoising loop; VLM prefix conditioning is the next milestone (it works, just with random conditioning today)
