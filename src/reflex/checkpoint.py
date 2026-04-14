@@ -27,6 +27,11 @@ GR00T_EXPECTED_PREFIXES = [
     "action_head.model.transformer_blocks.",
 ]
 
+OPENVLA_EXPECTED_PREFIXES = [
+    "vision_backbone.featurizer.",
+    "projector.fc1.",
+]
+
 PI05_MARKERS = [
     "input_layernorm.dense.weight",  # AdaRMSNorm — pi0.5 only
 ]
@@ -72,6 +77,16 @@ SUPPORTED_MODELS = {
         "action_chunk_size": 50,
         "action_dim": 128,  # max_action_dim
     },
+    "openvla": {
+        "hf_id": "openvla/openvla-7b",
+        "params_m": 7541,
+        "vision_encoder": "dino_siglip",
+        "backbone": "llama2_7b",
+        "action_head": "tokenized_bins",  # argmax + 256-bin lookup, no flow matching
+        "num_denoising_steps": 1,  # single forward pass
+        "action_chunk_size": 1,
+        "action_dim": 7,
+    },
 }
 
 
@@ -80,6 +95,9 @@ def detect_model_type(state_dict: dict[str, torch.Tensor]) -> str | None:
     # GR00T check first (most specific prefix)
     if any(any(k.startswith(p) for k in keys) for p in GR00T_EXPECTED_PREFIXES):
         return "gr00t"
+    # OpenVLA (vision_backbone + projector)
+    if any(any(k.startswith(p) for k in keys) for p in OPENVLA_EXPECTED_PREFIXES):
+        return "openvla"
     # pi0 / pi0.5
     if any(any(k.startswith(p) for k in keys) for p in PI0_EXPECTED_PREFIXES):
         # Differentiate pi0 vs pi0.5 via AdaRMSNorm marker

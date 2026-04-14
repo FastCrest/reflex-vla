@@ -125,6 +125,9 @@ def export(
     start = time.perf_counter()
     if model_type == "gr00t":
         result = export_gr00t(export_config, state_dict=state_dict)
+    elif model_type == "openvla":
+        from reflex.exporters.openvla_exporter import export_openvla
+        result = export_openvla(export_config, state_dict=state_dict)
     elif model_type == "pi05":
         result = export_pi05(export_config, state_dict=state_dict)
     elif model_type == "pi0":
@@ -324,7 +327,8 @@ def models():
         "smolvla": "[green]✓ ONNX + validated[/green]",
         "pi0": "[green]✓ ONNX + validated[/green]",
         "pi05": "[green]✓ ONNX + AdaRMSNorm[/green]",
-        "gr00t": "[green]✓ DiT + AdaLN (v1 — needs Modal validation)[/green]",
+        "gr00t": "[green]✓ DiT + AdaLN + validated[/green]",
+        "openvla": "[yellow]use optimum-onnx; Reflex only ships postprocess helpers[/yellow]",
     }
 
     for key, info in SUPPORTED_MODELS.items():

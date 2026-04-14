@@ -17,7 +17,13 @@ curl -X POST http://localhost:8000/act -d '{"instruction":"pick up the cup","sta
 | pi0 | `lerobot/pi0_base` | 3.5B | ONNX + validated (max_diff=3.7e-08) |
 | pi0.5 | `lerobot/pi05_base` | 3.62B | ONNX + AdaRMSNorm (max_diff=2.4e-06) |
 | GR00T N1.6 | `nvidia/GR00T-N1.6-3B` | 3.29B | ONNX + DiT/AdaLN (max_diff=2.2e-05) |
-| OpenVLA | `openvla/openvla-7b` | 7.5B | planned |
+| OpenVLA | `openvla/openvla-7b` | 7.5B | use `optimum-cli export onnx` + our postprocess helper |
+
+OpenVLA is a vanilla Llama-2-7B VLM whose "action head" is
+`argmax(lm_logits[:, -7:])` + 256-bin lookup — no custom expert to
+reconstruct, so `optimum-onnx` handles the model and
+`reflex.postprocess.openvla.decode_actions` handles the
+bin-to-continuous conversion.
 
 Run `reflex models` to see current support.
 
