@@ -237,67 +237,53 @@ def bench_trt():
                 engine_mb = os.path.getsize(engine_path) / 1e6
                 print(f"    engine built in {build_s:.1f}s, size={engine_mb:.1f}MB", flush=True)
 
-                # Load engine via tensorrt Python
-                import tensorrt as trt
-                logger = trt.Logger(trt.Logger.WARNING)
-                with open(engine_path, "rb") as f:
-                    rt = trt.Runtime(logger)
-                    engine = rt.deserialize_cuda_engine(f.read())
-                context = engine.create_execution_context()
-
-                # Allocate IO buffers
-                np_noisy_fp16 = noisy.half().cpu().numpy()
-                np_t_fp16 = np.array([0.5], dtype=np.float16)
-                np_pos = pos_ids.cpu().numpy().astype(np.int64)
-
-                # Use tensor names — TRT 10+ API
-                # Input/output indices
-                import ctypes
-
-                # Use torch tensors on CUDA as our buffers
-                noisy_cuda = torch.from_numpy(np_noisy_fp16).cuda().contiguous()
-                t_cuda = torch.from_numpy(np_t_fp16).cuda().contiguous()
-                pos_cuda = torch.from_numpy(np_pos).cuda().contiguous()
-                # Output — shape [1, 50, action_dim or 1024 for gr00t intermediate]
-                # We need to query the engine for output shape. For FP16 output.
-                out_shape = list(noisy_cuda.shape)
-                # We know our models output same shape as input for smolvla/pi0/pi05,
-                # but 1024-dim for gr00t's pre-decoder path. For full-stack gr00t,
-                # same shape as input. Use that.
-                out_cuda = torch.empty(out_shape, dtype=torch.float16, device="cuda").contiguous()
-
-                # Bind
-                context.set_tensor_address("noisy_actions", noisy_cuda.data_ptr())
-                context.set_tensor_address("timestep", t_cuda.data_ptr())
-                context.set_tensor_address("position_ids", pos_cuda.data_ptr())
-                context.set_tensor_address("velocity", out_cuda.data_ptr())
-
-                stream = torch.cuda.Stream().cuda_stream
-
-                def _trt():
-                    context.execute_async_v3(stream_handle=stream)
-                    torch.cuda.synchronize()
-                    return out_cuda
-
-                # Warmup
-                for _ in range(10):
-                    _trt()
-                lats = []
-                for _ in range(50):
-                    torch.cuda.synchronize()
-                    t0 = time.perf_counter()
-                    _trt()
-                    torch.cuda.synchronize()
-                    lats.append((time.perf_counter() - t0) * 1000)
-                lats.sort()
-                trt_stats = {
-                    "mean_ms": round(sum(lats) / len(lats), 3),
-                    "p50_ms": round(lats[len(lats) // 2], 3),
-                    "p95_ms": round(lats[int(len(lats) * 0.95)], 3),
-                    "engine_mb": round(engine_mb, 1),
-                    "build_s": round(build_s, 1),
-                }
-                print(f"    {trt_stats}", flush=True)
+                # Benchmark via `trtexec --loadEngine` — avoids needing the
+                # Python TRT bindings (which are not installed in the
+                # nvcr.io/nvidia/tensorrt container by default; they require
+                # /opt/tensorrt/python/python_setup.sh). trtexec already
+                # measures GPU compute latency precisely.
+                bench_cmd = [
+                    "trtexec",
+                    f"--loadEngine={engine_path}",
+                    "--warmUp=200",
+                    "--iterations=500",
+                    "--avgRuns=100",
+                    "--useCudaGraph",
+                ]
+                br = subprocess.run(bench_cmd, capture_output=True, text=True, timeout=300)
+                if br.returncode != 0:
+                    trt_stats = {
+                        "error": f"trtexec bench exit {br.returncode}: {br.stderr[-300:]}",
+                        "engine_mb": round(engine_mb, 1),
+                        "build_s": round(build_s, 1),
+                    }
+                    print(f"    BENCH FAILED: {trt_stats['error']}", flush=True)
+                else:
+                    # Parse trtexec output for GPU Compute Time line:
+                    #   GPU Compute Time: min = X ms, max = Y ms, mean = Z ms,
+                    #     median = W ms, percentile(99%) = V ms
+                    import re
+                    gpu_line = ""
+                    for line in br.stdout.splitlines():
+                        if "GPU Compute Time" in line:
+                            gpu_line = line
+                            break
+                    parsed = {}
+                    for key in ("min", "max", "mean", "median", "percentile(99%)"):
+                        m = re.search(rf"{re.escape(key)}\s*=\s*([0-9.]+)\s*ms", gpu_line)
+                        if m:
+                            parsed[key] = float(m.group(1))
+                    trt_stats = {
+                        "mean_ms": parsed.get("mean"),
+                        "p50_ms": parsed.get("median"),
+                        "p95_ms": parsed.get("percentile(99%)"),  # close-enough
+                        "min_ms": parsed.get("min"),
+                        "max_ms": parsed.get("max"),
+                        "engine_mb": round(engine_mb, 1),
+                        "build_s": round(build_s, 1),
+                        "raw_line": gpu_line.strip(),
+                    }
+                    print(f"    {trt_stats}", flush=True)
         except Exception as e:
             import traceback
             trt_stats = {"error": str(e)[:300], "trace": traceback.format_exc()[:500]}
