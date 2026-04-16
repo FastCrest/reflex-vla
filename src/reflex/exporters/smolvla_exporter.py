@@ -119,21 +119,22 @@ class ExpertStack(nn.Module):
 
         self.final_norm = DecomposedRMSNorm(final_norm_weight)
 
-    def forward(self, noisy_actions, timestep, position_ids):
+    def forward(self, noisy_actions, timestep, position_ids, vlm_kv: torch.Tensor | None = None):
         b, c, _ = noisy_actions.shape
         act = self.action_in_proj(noisy_actions)
         t_emb = _sinusoidal_pos_embedding(timestep, self.expert_hidden)
         t_emb = t_emb.unsqueeze(1).expand(-1, c, -1)
         x = self.action_time_mlp_out(F.silu(self.action_time_mlp_in(torch.cat([act, t_emb], dim=-1))))
 
-        # Only allocate cross-attn KV placeholder when cross-attn layers exist
-        dummy_kv = None
-        if self.cross_indices and self.vlm_kv_dim > 0:
-            dummy_kv = torch.zeros(b, 1, self.vlm_kv_dim, device=x.device, dtype=x.dtype)
+        # Use provided VLM KV or fall back to zeros for backward compat
+        if vlm_kv is None:
+            cross_kv = torch.zeros(b, 1, self.vlm_kv_dim, device=x.device, dtype=x.dtype) if (self.cross_indices and self.vlm_kv_dim > 0) else None
+        else:
+            cross_kv = vlm_kv
 
         for i, layer in enumerate(self.layers):
             if i in self.cross_indices:
-                x = layer(x, position_ids, cross_kv=dummy_kv)
+                x = layer(x, position_ids, cross_kv=cross_kv)
             else:
                 x = layer(x, position_ids)
 
@@ -281,15 +282,20 @@ def export_smolvla(
     dummy_actions = torch.randn(1, chunk_size, action_dim)
     dummy_time = torch.tensor([0.5])
     dummy_pos = torch.arange(chunk_size).unsqueeze(0)
+    vlm_kv_dim = expert_meta["vlm_kv_dim"]
+    dummy_vlm_kv = torch.zeros(1, 1, vlm_kv_dim)
 
     expert_onnx = output_dir / "expert_stack.onnx"
     export_module_to_onnx(
         expert_stack,
-        (dummy_actions, dummy_time, dummy_pos),
+        (dummy_actions, dummy_time, dummy_pos, dummy_vlm_kv),
         expert_onnx,
-        input_names=["noisy_actions", "timestep", "position_ids"],
+        input_names=["noisy_actions", "timestep", "position_ids", "vlm_kv"],
         output_names=["velocity"],
-        dynamic_axes={"noisy_actions": {0: "batch"}, "timestep": {0: "batch"}, "position_ids": {0: "batch"}},
+        dynamic_axes={
+            "noisy_actions": {0: "batch"}, "timestep": {0: "batch"},
+            "position_ids": {0: "batch"}, "vlm_kv": {0: "batch", 1: "seq"},
+        },
         opset_version=config.opset,
     )
     optimize_onnx(expert_onnx)
@@ -307,8 +313,9 @@ def export_smolvla(
                 "noisy_actions": dummy_actions.numpy(),
                 "timestep": dummy_time.numpy(),
                 "position_ids": dummy_pos.numpy().astype(np.int64),
+                "vlm_kv": dummy_vlm_kv.numpy(),
             })[0]
-            torch_out = expert_stack(dummy_actions, dummy_time, dummy_pos).detach().numpy()
+            torch_out = expert_stack(dummy_actions, dummy_time, dummy_pos, dummy_vlm_kv).detach().numpy()
             max_diff = float(np.abs(ort_out - torch_out).max())
             result["metadata"]["onnx_validation"] = {"max_diff": max_diff, "passed": max_diff < 0.01}
             logger.info("ONNX validation: max_diff=%.2e (%s)", max_diff, "PASS" if max_diff < 0.01 else "FAIL")
@@ -343,6 +350,8 @@ def export_smolvla(
             "precision": hardware.trt_precision,
         },
         "expert": expert_meta,
+        "vlm_kv_input": True,
+        "vlm_kv_dim": vlm_kv_dim,
     }
     config_path = output_dir / "reflex_config.json"
     config_path.write_text(json.dumps(export_config, indent=2))
