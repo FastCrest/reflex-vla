@@ -159,24 +159,11 @@ class ReflexSmolVLAServer(PredictModelServer):
 
 
 if __name__ == "__main__":
-    import inspect
-    server = ReflexSmolVLAServer()
-    sig = inspect.signature(run_server)
-    if "port" in sig.parameters:
-        run_server(server, port=8766)
-    elif "host" in sig.parameters:
-        run_server(server, host="0.0.0.0", port=8766)
-    else:
-        # vla-eval 0.1.0 may use a different API; try positional
-        try:
-            run_server(server)
-        except Exception as e:
-            print(f"run_server failed: {e}")
-            # Fallback: just keep server alive for testing
-            import time
-            print("Server ready for manual testing")
-            while True:
-                time.sleep(1)
+    # run_server takes a CLASS, auto-parses __init__ args into CLI flags.
+    # It always adds --port (default 8000), --host, --address, --verbose.
+    import sys
+    sys.argv = [sys.argv[0], "--port", "8000"]
+    run_server(ReflexSmolVLAServer)
 '''
 
     adapter_path = "/tmp/reflex_model_server.py"
@@ -244,72 +231,101 @@ if __name__ == "__main__":
         return results
     log("model_server", "pass", "Model server started on port 8766")
 
-    # ── Step 5: Run LIBERO-10 evaluation ──────────────────────────
-    print("\n=== Step 5: Run LIBERO-10 ===")
-    print("  This may take 30-120 minutes on A10G...")
+    # ── Step 5: Write LIBERO-10 config ──────────────────────────────
+    print("\n=== Step 5: Write LIBERO-10 config ===")
+    libero_config = {
+        "server": {"url": "ws://localhost:8000"},
+        "output_dir": "/tmp/libero_results",
+        "benchmarks": [{
+            "benchmark": "vla_eval.benchmarks.libero.benchmark:LIBEROBenchmark",
+            "subname": "libero_10",
+            "mode": "sync",
+            "episodes_per_task": 10,  # 10 per task (100 total) for speed; 50 is the full eval
+            "params": {
+                "suite": "libero_10",
+                "seed": 7,
+                "num_steps_wait": 10,
+            },
+        }],
+    }
 
-    # Try the vla-eval CLI first
+    import yaml
+    config_path = "/tmp/libero_10_config.yaml"
+    with open(config_path, "w") as f:
+        yaml.dump(libero_config, f)
+    log("config", "pass", f"LIBERO-10 config written to {config_path}")
+
+    # ── Step 6: Run LIBERO-10 evaluation ──────────────────────────
+    print("\n=== Step 6: Run LIBERO-10 (10 eps/task, ~30 min) ===")
+
     eval_result = subprocess.run(
         ["vla-eval", "run",
-         "--benchmark", "libero_10",
-         "--server-url", "ws://localhost:8766",
+         "--config", config_path,
          "--no-docker",
-         "--num-episodes", "10",  # 10 episodes per task (not 50, for speed)
+         "--server-url", "ws://localhost:8000",
+         "--yes",
+         "--verbose",
          ],
         capture_output=True, text=True,
         timeout=7200,
+        env={**os.environ, "MUJOCO_GL": "egl"},
     )
+
+    print("  stdout (last 2000 chars):")
+    print(eval_result.stdout[-2000:])
+    if eval_result.stderr:
+        print("  stderr (last 1000 chars):")
+        print(eval_result.stderr[-1000:])
 
     if eval_result.returncode == 0:
         log("libero10", "pass", "LIBERO-10 evaluation completed")
-        print(eval_result.stdout[-2000:])
-    else:
-        # vla-eval CLI might have different flags; try alternative
-        print(f"  vla-eval run failed: {eval_result.stderr[-500:]}")
-        print(f"  stdout: {eval_result.stdout[-500:]}")
 
-        # Fallback: run LIBERO evaluation directly via Python
-        print("\n  Attempting direct LIBERO evaluation...")
-        direct_eval = subprocess.run(
-            ["python", "-c", """
-import sys
+        # Parse results
+        results_dir = "/tmp/libero_results"
+        if os.path.exists(results_dir):
+            for f in os.listdir(results_dir):
+                if f.endswith(".json"):
+                    with open(os.path.join(results_dir, f)) as rf:
+                        eval_data = json.load(rf)
+                        print(f"  Result file: {f}")
+                        print(f"  {json.dumps(eval_data, indent=2)[:1000]}")
+    else:
+        print(f"\n  vla-eval run exit code: {eval_result.returncode}")
+
+        # Fallback: self-test to prove the model server works
+        print("\n  Running self-test instead...")
+        self_test = subprocess.run(
+            ["python", "-c", f"""
+import sys, os, json
 sys.path.insert(0, '/tmp')
+os.environ['REFLEX_EXPORT_DIR'] = '{export_dir}'
 from reflex_model_server import ReflexSmolVLAServer
 import numpy as np
 
 server = ReflexSmolVLAServer()
-
-# Simple self-test: generate actions for a dummy observation
-dummy_obs = {
-    "images": {"top": np.random.rand(224, 224, 3).astype(np.float32)},
+dummy_obs = {{
+    "images": {{"top": np.random.rand(224, 224, 3).astype(np.float32)}},
     "states": np.zeros(7, dtype=np.float32),
     "task_description": "pick up the red cup",
-}
+}}
 result = server.predict(dummy_obs)
 actions = result["actions"]
-print(f"Action shape: {actions.shape}")
-print(f"Action range: [{actions.min():.4f}, {actions.max():.4f}]")
-print(f"Action mean: {actions.mean():.4f}")
-print(f"Finite: {np.isfinite(actions).all()}")
-print(f"SELF-TEST: PASS")
+print(f"Shape: {{actions.shape}}, Range: [{{actions.min():.3f}}, {{actions.max():.3f}}]")
+print(f"Finite: {{np.isfinite(actions).all()}}")
+print("SELF-TEST: PASS")
 """],
             capture_output=True, text=True,
             env={**os.environ, "REFLEX_EXPORT_DIR": export_dir},
             timeout=120,
         )
-        print(direct_eval.stdout)
-        if direct_eval.stderr:
-            print(f"  stderr: {direct_eval.stderr[-300:]}")
-
-        if "SELF-TEST: PASS" in direct_eval.stdout:
-            log("self_test", "pass", "Model server produces valid actions")
+        print(self_test.stdout)
+        if "SELF-TEST: PASS" in self_test.stdout:
+            log("self_test", "pass", "Model server works; vla-eval CLI integration needs debugging")
         else:
-            log("self_test", "fail", direct_eval.stderr[-300:])
+            log("self_test", "fail", self_test.stderr[-300:])
 
         log("libero10", "fail",
-            "vla-eval CLI not available or LIBERO not installed. "
-            "Self-test passed — model server works. "
-            "Full LIBERO eval requires manual vla-eval setup.")
+            f"vla-eval run exited {eval_result.returncode}. Self-test {'passed' if 'SELF-TEST: PASS' in self_test.stdout else 'failed'}.")
 
     # Cleanup
     server_proc.terminate()
