@@ -28,6 +28,8 @@ image = (
         "mujoco>=3.0", "gymnasium",
     )
     .pip_install("vla-eval")
+    .pip_install("robosuite>=1.4", "h5py")
+    .run_commands("pip install 'libero @ git+https://github.com/Lifelong-Robot-Learning/LIBERO.git'")
     .add_local_dir("src/reflex", "/root/reflex-vla/src/reflex", copy=True)
     .add_local_file("pyproject.toml", "/root/reflex-vla/pyproject.toml", copy=True)
     .add_local_file("README.md", "/root/reflex-vla/README.md", copy=True)
