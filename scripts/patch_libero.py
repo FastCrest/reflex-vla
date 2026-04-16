@@ -16,6 +16,11 @@ if not target.exists():
 lines = target.read_text().splitlines()
 patched = 0
 
+# Dump lines 60-80 for debugging
+print("--- Lines 60-80 BEFORE patch ---")
+for i in range(max(0, 59), min(len(lines), 80)):
+    print(f"  {i+1:3d}: {lines[i]!r}")
+
 new_lines = []
 for i, line in enumerate(lines):
     if "input(" in line or "input()" in line:
