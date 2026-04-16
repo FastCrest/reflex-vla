@@ -29,7 +29,11 @@ image = (
     )
     .pip_install("vla-eval")
     .pip_install("robosuite>=1.4", "h5py")
-    .run_commands("pip install 'libero @ git+https://github.com/Lifelong-Robot-Learning/LIBERO.git'")
+    .run_commands(
+        "git clone https://github.com/Lifelong-Robot-Learning/LIBERO.git /opt/LIBERO"
+        " && cd /opt/LIBERO && pip install -e ."
+        " && python -c 'from libero.libero import benchmark; print(\"LIBERO OK\")'"
+    )
     .add_local_dir("src/reflex", "/root/reflex-vla/src/reflex", copy=True)
     .add_local_file("pyproject.toml", "/root/reflex-vla/pyproject.toml", copy=True)
     .add_local_file("README.md", "/root/reflex-vla/README.md", copy=True)
