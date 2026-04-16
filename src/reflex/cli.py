@@ -137,11 +137,10 @@ def export(
         result = export_pi0(export_config, state_dict=state_dict)
     else:
         result = export_smolvla(export_config, state_dict=state_dict)
-    elapsed = time.perf_counter() - start
+    elapsed_expert = time.perf_counter() - start
 
-    # Print results
-    console.print(f"\n[bold green]Export complete in {elapsed:.1f}s[/bold green]")
-    console.print(f"  Output: {output}")
+    # Print expert results
+    console.print(f"\n[bold green]Expert export complete in {elapsed_expert:.1f}s[/bold green]")
 
     if "files" in result:
         for name, path in result["files"].items():
@@ -157,6 +156,40 @@ def export(
         meta = result["metadata"]["expert"]
         console.print(f"  Expert: {meta['num_layers']} layers, {meta['total_params_m']:.1f}M params")
 
+    # For SmolVLA: also export the VLM pipeline (vision_encoder + text_embedder + decoder_prefill)
+    # so `reflex serve` can run with real task-conditioned actions instead of noise.
+    # Note: VLM weights come from the base SmolVLM2-500M (not the SmolVLA checkpoint's
+    # fine-tuned VLM). Fine-tuned VLM weight transfer is tracked as a v0.3 item.
+    if model_type == "smolvla":
+        console.print("\n[dim]Exporting VLM pipeline (vision + text + decoder)...[/dim]")
+        from reflex.exporters.vlm_prefix_exporter import export_vlm_prefix
+        vlm_start = time.perf_counter()
+        try:
+            vlm_path = export_vlm_prefix(output_dir=output, opset=opset)
+            elapsed_vlm = time.perf_counter() - vlm_start
+            console.print(f"[bold green]VLM export complete in {elapsed_vlm:.1f}s[/bold green]")
+            # Show VLM output files
+            for fname in ("vision_encoder.onnx", "text_embedder.onnx", "decoder_prefill.onnx"):
+                fpath = Path(output) / fname
+                if fpath.exists():
+                    data_path = fpath.with_suffix(".onnx.data")
+                    size = fpath.stat().st_size / 1e6
+                    if data_path.exists():
+                        size += data_path.stat().st_size / 1e6
+                    console.print(f"  {fname}: {size:.1f}MB")
+            console.print(
+                "  [dim]Note: VLM uses base SmolVLM2-500M weights. "
+                "Fine-tuned SmolVLA VLM layers not yet preserved (v0.3 item).[/dim]"
+            )
+        except Exception as exc:
+            console.print(f"[yellow]VLM export skipped: {exc}[/yellow]")
+            console.print(
+                "[yellow]Server will use dummy VLM conditioning (v0.1 fallback).[/yellow]"
+            )
+
+    total_elapsed = time.perf_counter() - start
+    console.print(f"\n[bold]Total export: {total_elapsed:.1f}s[/bold]")
+    console.print(f"  Output: {output}")
     console.print(f"\n  [dim]Run on target hardware:[/dim]")
     console.print(f"  [cyan]reflex bench {output}[/cyan]")
 
