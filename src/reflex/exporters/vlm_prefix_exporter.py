@@ -353,18 +353,133 @@ def export_vlm_prefix(
     config_path.write_text(json.dumps(config, indent=2))
     logger.info("Updated config: %s", config_path)
 
-    # 8. Export decoder prefill alongside the vision encoder
+    # 8. Export text embedder
+    text_emb_path = export_text_embedder(
+        checkpoint_path_or_id=checkpoint_path_or_id,
+        output_dir=output_dir,
+        opset=opset,
+    )
+
+    # 9. Export decoder prefill
     decoder_path = export_decoder_prefill(
         checkpoint_path_or_id=checkpoint_path_or_id,
         output_dir=output_dir,
         opset=opset,
     )
 
-    # Update config with decoder path
+    # Update config with all export paths
     config = json.loads(config_path.read_text())
+    config["text_embedder_onnx"] = "text_embedder.onnx"
     config["decoder_prefill_onnx"] = "decoder_prefill.onnx"
     config_path.write_text(json.dumps(config, indent=2))
-    logger.info("Updated config with decoder_prefill_onnx: %s", config_path)
+    logger.info("Updated config with text_embedder + decoder_prefill: %s", config_path)
+
+    return onnx_path
+
+
+# ---------------------------------------------------------------------------
+# Text embedder export
+# ---------------------------------------------------------------------------
+
+
+def export_text_embedder(
+    checkpoint_path_or_id: str = DEFAULT_VLM_MODEL_NAME,
+    output_dir: str | Path = ".",
+    opset: int = 19,
+) -> Path:
+    """Export the token embedding table as a standalone ONNX.
+
+    Input: ``input_ids [B, seq]`` int64
+    Output: ``text_embeds [B, seq, 960]`` float32
+    """
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    from transformers import AutoModel as _AutoModel
+
+    logger.info("Loading VLM for text embedder export: %s", checkpoint_path_or_id)
+    model = _AutoModel.from_pretrained(
+        checkpoint_path_or_id, trust_remote_code=True
+    )
+    model.eval()
+
+    # Find embed_tokens — try multiple attribute paths
+    embed_tokens = None
+    for attr_path in [
+        "text_model.embed_tokens",
+        "model.embed_tokens",
+        "language_model.model.embed_tokens",
+        "text_model.model.embed_tokens",
+    ]:
+        obj = model
+        try:
+            for part in attr_path.split("."):
+                obj = getattr(obj, part)
+            embed_tokens = obj
+            logger.info("Found embed_tokens at model.%s", attr_path)
+            break
+        except AttributeError:
+            continue
+
+    if embed_tokens is None:
+        raise RuntimeError(
+            "Could not find embed_tokens in model. Tried: "
+            "text_model.embed_tokens, model.embed_tokens, "
+            "language_model.model.embed_tokens, text_model.model.embed_tokens"
+        )
+
+    class EmbedTokensForONNX(torch.nn.Module):
+        def __init__(self, embed):
+            super().__init__()
+            self.embed = embed
+
+        def forward(self, input_ids: torch.Tensor) -> torch.Tensor:
+            return self.embed(input_ids)
+
+    wrapper = EmbedTokensForONNX(embed_tokens).eval()
+    vocab_size = embed_tokens.num_embeddings
+    embed_dim = embed_tokens.embedding_dim
+    logger.info("EmbedTokens: vocab=%d, dim=%d", vocab_size, embed_dim)
+
+    # Export
+    dummy_ids = torch.randint(0, min(vocab_size, 1000), (1, 32), dtype=torch.int64)
+    onnx_path = output_dir / "text_embedder.onnx"
+
+    with torch.no_grad():
+        torch.onnx.export(
+            wrapper,
+            (dummy_ids,),
+            str(onnx_path),
+            input_names=["input_ids"],
+            output_names=["text_embeds"],
+            dynamic_axes={
+                "input_ids": {0: "batch", 1: "seq"},
+                "text_embeds": {0: "batch", 1: "seq"},
+            },
+            opset_version=opset,
+            do_constant_folding=False,
+        )
+
+    logger.info(
+        "Wrote %s (%.2f MB)",
+        onnx_path,
+        onnx_path.stat().st_size / 1e6,
+    )
+
+    # Validate
+    try:
+        import onnxruntime as ort
+        import numpy as np
+
+        sess = ort.InferenceSession(str(onnx_path), providers=["CPUExecutionProvider"])
+        with torch.no_grad():
+            torch_out = wrapper(dummy_ids).numpy()
+        ort_out = sess.run(None, {"input_ids": dummy_ids.numpy()})[0]
+        max_diff = float(np.abs(torch_out - ort_out).max())
+        logger.info("Text embedder ONNX validation: max_diff=%.2e (PASS)" if max_diff < 1e-4
+                     else "Text embedder ONNX validation: max_diff=%.2e (WARN)", max_diff)
+    except ImportError:
+        logger.warning("onnxruntime not installed — skipping validation")
 
     return onnx_path
 
