@@ -32,17 +32,8 @@ image = (
     .run_commands(
         "git clone https://github.com/Lifelong-Robot-Learning/LIBERO.git /opt/LIBERO"
         " && cd /opt/LIBERO && pip install -e ."
-        # Patch LIBERO's __init__.py to skip the stdin prompt (line ~69)
-        # It calls input() to ask for data dir; replace with env var fallback
-        " && python -c \""
-        "import pathlib; "
-        "p = pathlib.Path('/opt/LIBERO/libero/libero/__init__.py'); "
-        "t = p.read_text(); "
-        "t = t.replace('input(', '(__import__(\"os\").environ.get(\"LIBERO_SUITE_DIR\", \"/tmp/libero_data\") or \"\").__class__ and __import__(\"os\").environ.get(\"LIBERO_SUITE_DIR\", \"/tmp/libero_data\") # patched input('); "
-        "p.write_text(t); "
-        "print('Patched LIBERO __init__.py')"
-        "\""
-        # Verify it imports now
+        # Patch: replace any `= input(...)` with env var fallback
+        " && sed -i 's/= input(.*/= os.environ.get(\"LIBERO_SUITE_DIR\", \"\\/tmp\\/libero_data\")/' /opt/LIBERO/libero/libero/__init__.py"
         " && python -c 'from libero.libero import benchmark; print(\"LIBERO import OK\")'"
     )
     .add_local_dir("src/reflex", "/root/reflex-vla/src/reflex", copy=True)
