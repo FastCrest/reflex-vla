@@ -76,3 +76,10 @@ goals:
     description: "reflex serve --audit-db appends every /act call to a SHA-256 hash-chain SQLite log"
     check: "test -f src/reflex/safety/audit_log.py && .venv/bin/python -c 'from reflex.safety.audit_log import AuditLog' 2>/dev/null"
     weight: 3
+
+  # ── REGRESSION GATE (runs after every /evolve cycle) ──────────────
+
+  - id: sim-smoke-test
+    description: "Trajectory replay against Open X-Embodiment data — predicted actions within L2 threshold of expert"
+    check: "test -f scripts/sim_smoke_test.py && .venv/bin/python scripts/sim_smoke_test.py --quick 2>/dev/null"
+    weight: 10
