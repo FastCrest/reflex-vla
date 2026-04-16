@@ -439,7 +439,7 @@ class ReflexServer:
         expert_has_vlm_kv = "vlm_kv" in self._expert_input_names
         if expert_has_vlm_kv and vlm_kv is None:
             # Expert expects vlm_kv but we have none — pass zeros of the right shape
-            vlm_kv_dim = self.config.get("vlm_kv_dim", 512)
+            vlm_kv_dim = self.config.get("vlm_kv_dim", 960)
             prefix_seq_len = self.config.get("vlm_prefix_seq_len", 50)
             batch = noisy_actions.shape[0]
             vlm_kv = np.zeros((batch, prefix_seq_len, vlm_kv_dim), dtype=np.float32)

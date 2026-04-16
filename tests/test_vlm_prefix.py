@@ -84,7 +84,7 @@ def v02_export_dir(tmp_path):
         "export_version": "0.2",
         "vlm_prefix_onnx": "vlm_prefix.onnx",
         "vlm_image_size": [384, 384],
-        "vlm_kv_dim": 512,
+        "vlm_kv_dim": 960,
         "vlm_prefix_seq_len": 50,
         "expert": {
             "expert_hidden": 720,
@@ -248,7 +248,7 @@ class TestServerVLMConditioning:
         )
         vlm_session = _make_mock_ort_session(
             ["image", "instruction_ids"],
-            (1, 50, 512),
+            (1, 50, 960),
         )
 
         server = ReflexServer(v02_export_dir, device="cpu")
@@ -339,7 +339,7 @@ class TestConfigV02Schema:
             "export_version": "0.2",
             "vlm_prefix_onnx": "vlm_prefix.onnx",
             "vlm_image_size": [384, 384],
-            "vlm_kv_dim": 512,
+            "vlm_kv_dim": 960,
             "vlm_prefix_seq_len": 50,
             "expert": {
                 "expert_hidden": 720,
@@ -357,7 +357,7 @@ class TestConfigV02Schema:
         assert len(loaded["vlm_image_size"]) == 2
         assert all(isinstance(x, int) for x in loaded["vlm_image_size"])
         assert isinstance(loaded["vlm_kv_dim"], int)
-        assert loaded["vlm_kv_dim"] == 512
+        assert loaded["vlm_kv_dim"] == 960
         assert isinstance(loaded["vlm_prefix_seq_len"], int)
 
     def test_v01_config_missing_vlm_fields(self, tmp_path):
@@ -375,7 +375,7 @@ class TestConfigV02Schema:
         assert "vlm_prefix_onnx" not in loaded
         assert "export_version" not in loaded
         assert loaded.get("vlm_prefix_onnx") is None
-        assert loaded.get("vlm_kv_dim", 512) == 512
+        assert loaded.get("vlm_kv_dim", 960) == 960
 
 
 # ---------------------------------------------------------------------------

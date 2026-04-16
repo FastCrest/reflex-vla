@@ -1,22 +1,18 @@
-"""VLM prefix encoder export for SmolVLA.
+"""VLM vision encoder export for SmolVLA.
 
-Extracts the VLM backbone (SigLIP vision encoder + SmolLM2 language model)
-from a SmolVLA checkpoint and exports it as a standalone ONNX graph.
+Extracts the SigLIP vision encoder + SmolVLM connector from the base VLM
+(HuggingFaceTB/SmolVLM2-500M-Video-Instruct) and exports as a standalone
+ONNX graph.
 
-The output ``prefix_kv`` tensor feeds the expert's cross-attention layers.
+The output ``image_embeds`` tensor of shape ``[B, 64, 960]`` feeds downstream
+text embedding concatenation and the expert prefill decoder.
 
-Approach chosen: **C (stub)**
-    Reconstructing the full SigLIP + SmolLM2 from raw state_dict tensors is
-    prohibitively complex — HuggingFace VLMs have deeply nested configs,
-    multi-modal merging layers, and vision-language connectors that don't
-    map 1:1 to simple nn.Module reconstruction. Approach A (AutoModel) would
-    work but requires downloading ~350 MB at export time and tight coupling
-    to a specific ``transformers`` version.
-
-    This v1 stub generates a *learned linear projection* of the correct shape,
-    proving the ONNX I/O contract (image + instruction_ids → prefix_kv) and
-    unblocking the server wiring (Issue 3). Numerical correctness of the VLM
-    itself is deferred to v2 when we wire the real HuggingFace forward pass.
+Approach: Load the base VLM via ``AutoModel.from_pretrained``, wrap
+vision_model + connector in a thin ``VisionEncoderForONNX`` module that
+pre-computes position IDs (avoiding the dynamic ``index_put`` in
+``SmolVLMVisionEmbeddings`` that doesn't trace to ONNX), export with
+``torch.onnx.export`` at opset 19, and post-fix any type mismatches
+in the ONNX graph via ``patch_onnx_type_mismatches``.
 """
 
 from __future__ import annotations
@@ -29,228 +25,320 @@ from typing import Any
 import torch
 import torch.nn as nn
 
-from reflex.checkpoint import load_checkpoint
-
 logger = logging.getLogger(__name__)
 
-# SmolVLA architecture constants
-DEFAULT_VLM_KV_DIM = 512
-DEFAULT_IMAGE_SIZE = 384  # SigLIP-SO400M patch size used by SmolVLM2-500M
-DEFAULT_INSTRUCTION_SEQ_LEN = 32
-DEFAULT_PREFIX_SEQ_LEN = 50  # output sequence length for prefix_kv
+# SmolVLM2-500M architecture constants
+DEFAULT_VLM_MODEL_NAME = "HuggingFaceTB/SmolVLM2-500M-Video-Instruct"
+DEFAULT_IMAGE_SIZE = 512  # SigLIP-SO400M native size for SmolVLM2
+DEFAULT_VLM_KV_DIM = 960  # SmolLM2 hidden size (also connector output dim)
+
+# Numerical validation threshold -- SigLIP's 27 transformer layers
+# accumulate fp32 rounding, so max_diff ~2-4e-4 is expected.
+# Mean diff is ~1e-5 which is excellent.
+ORT_MAX_DIFF_THRESHOLD = 5e-4
 
 
-class VLMPrefixEncoder(nn.Module):
-    """Wraps the VLM backbone (SigLIP + SmolLM2) for prefix generation.
+class VisionEncoderForONNX(nn.Module):
+    """Wraps SigLIP vision encoder + SmolVLM connector for ONNX export.
 
-    v1 (stub): A small learned network that maps image + instruction tokens
-    to a ``prefix_kv`` tensor of shape ``[batch, prefix_seq, vlm_kv_dim]``.
+    Pre-computes position IDs for full (unpadded) images to avoid the
+    dynamic ``index_put`` / ``bucketize`` loop in
+    ``SmolVLMVisionEmbeddings.forward()`` that produces ONNX nodes
+    with int64/float type mismatches ORT cannot load.
 
-    The stub preserves the exact I/O contract so downstream consumers
-    (expert cross-attention, ONNX runtime, server predict loop) work
-    identically once the real VLM forward pass is wired in v2.
-
-    TODO: Wire real SigLIP → SmolLM2 forward pass (v2).
+    Input:  ``pixel_values`` -- ``[B, 3, image_size, image_size]`` float32
+    Output: ``image_embeds``  -- ``[B, 64, 960]`` float32
     """
 
     def __init__(
         self,
-        vlm_state_dict: dict[str, torch.Tensor] | None = None,
-        *,
+        vision_model: nn.Module,
+        connector: nn.Module,
         image_size: int = DEFAULT_IMAGE_SIZE,
-        vlm_kv_dim: int = DEFAULT_VLM_KV_DIM,
-        prefix_seq_len: int = DEFAULT_PREFIX_SEQ_LEN,
-        instruction_seq_len: int = DEFAULT_INSTRUCTION_SEQ_LEN,
     ):
         super().__init__()
-        self.image_size = image_size
-        self.vlm_kv_dim = vlm_kv_dim
-        self.prefix_seq_len = prefix_seq_len
-        self.instruction_seq_len = instruction_seq_len
+        # Extract sub-modules from the vision model
+        self.patch_embedding = vision_model.embeddings.patch_embedding
+        self.position_embedding = vision_model.embeddings.position_embedding
+        self.encoder = vision_model.encoder
+        self.post_layernorm = vision_model.post_layernorm
+        self.connector = connector
 
-        # --- Stub layers (replace with real VLM in v2) ---
-        # Image path: flatten a small spatial pool → project
-        self.image_pool = nn.AdaptiveAvgPool2d((4, 4))  # → [B, 3, 4, 4]
-        self.image_proj = nn.Linear(3 * 4 * 4, vlm_kv_dim)
+        # Pre-compute position IDs for a full image (no padding).
+        # This replicates SmolVLMVisionEmbeddings.forward() logic
+        # but without the dynamic for-loop / boolean indexing.
+        emb = vision_model.embeddings
+        patch_size = emb.patch_size
+        num_patches_per_side = emb.num_patches_per_side
+        nb_h = image_size // patch_size
+        nb_w = image_size // patch_size
 
-        # Instruction path: tiny embedding → mean pool → project
-        self.tok_embed = nn.Embedding(50257, 64)  # small vocab embed
-        self.tok_proj = nn.Linear(64, vlm_kv_dim)
+        boundaries = torch.arange(
+            1 / num_patches_per_side, 1.0, 1 / num_patches_per_side
+        )
+        h_idx = torch.arange(nb_h, dtype=torch.float32)
+        w_idx = torch.arange(nb_w, dtype=torch.float32)
+        frac_h = h_idx / nb_h * (1 - 1e-6)
+        frac_w = w_idx / nb_w * (1 - 1e-6)
+        bucket_h = torch.bucketize(frac_h, boundaries, right=True)
+        bucket_w = torch.bucketize(frac_w, boundaries, right=True)
+        pos_ids = (bucket_h[:, None] * num_patches_per_side + bucket_w).flatten()
+        self.register_buffer("position_ids", pos_ids.unsqueeze(0))  # [1, num_patches]
 
-        # Fuse image + text → prefix_kv sequence
-        self.fuse_proj = nn.Linear(vlm_kv_dim, prefix_seq_len * vlm_kv_dim)
-
-    def forward(
-        self,
-        image: torch.Tensor,
-        instruction_ids: torch.Tensor,
-    ) -> torch.Tensor:
-        """Generate VLM prefix for expert cross-attention.
+    def forward(self, pixel_values: torch.Tensor) -> torch.Tensor:
+        """Run vision encoding: patch embed -> position embed -> encoder -> connector.
 
         Args:
-            image: ``[batch, image_size, image_size, 3]`` float32 (HWC)
-            instruction_ids: ``[batch, seq]`` int64 token IDs
+            pixel_values: ``[B, 3, 512, 512]`` float32
 
         Returns:
-            prefix_kv: ``[batch, prefix_seq_len, vlm_kv_dim]`` float32
+            image_embeds: ``[B, 64, 960]`` float32
         """
-        b = image.shape[0]
+        batch_size = pixel_values.shape[0]
 
-        # Image branch: HWC → CHW → pool → flatten → project
-        img = image.permute(0, 3, 1, 2)  # [B, 3, H, W]
-        img = self.image_pool(img)  # [B, 3, 4, 4]
-        img_flat = img.reshape(b, -1)  # [B, 48]
-        img_emb = self.image_proj(img_flat)  # [B, vlm_kv_dim]
+        # Patch embedding: [B, 3, 512, 512] -> [B, hidden_dim, 32, 32] -> [B, 1024, hidden_dim]
+        patch_embeds = self.patch_embedding(pixel_values)
+        embeddings = patch_embeds.flatten(2).transpose(1, 2)
 
-        # Text branch: embed → mean pool → project
-        tok = self.tok_embed(instruction_ids)  # [B, seq, 64]
-        tok_mean = tok.mean(dim=1)  # [B, 64]
-        tok_emb = self.tok_proj(tok_mean)  # [B, vlm_kv_dim]
+        # Add pre-computed position embeddings
+        pos_ids = self.position_ids.expand(batch_size, -1)
+        embeddings = embeddings + self.position_embedding(pos_ids)
 
-        # Fuse and reshape to prefix sequence
-        fused = img_emb + tok_emb  # [B, vlm_kv_dim]
-        prefix = self.fuse_proj(fused)  # [B, prefix_seq_len * vlm_kv_dim]
-        prefix_kv = prefix.reshape(b, self.prefix_seq_len, self.vlm_kv_dim)
+        # Vision transformer encoder (no attention mask needed for full images)
+        encoder_output = self.encoder(inputs_embeds=embeddings)
+        hidden = encoder_output.last_hidden_state
+        hidden = self.post_layernorm(hidden)  # [B, 1024, 768]
 
-        return prefix_kv
+        # Connector: pixel shuffle + linear projection -> [B, 64, 960]
+        image_embeds = self.connector(hidden)
+        return image_embeds
 
 
-def _detect_vlm_config(state_dict: dict[str, torch.Tensor]) -> dict[str, Any]:
-    """Detect VLM architecture parameters from checkpoint keys.
+def patch_onnx_type_mismatches(onnx_path: str | Path) -> int:
+    """Fix type mismatches in an ONNX graph that prevent ORT loading.
 
-    Looks at cross-attention key projection shapes to infer vlm_kv_dim,
-    and counts VLM-prefixed tensors to confirm VLM presence.
+    Walks the ONNX graph and fixes two classes of issues:
+
+    1. **Gather with float indices**: Inserts ``Cast(to=INT64)`` before
+       any Gather node whose indices input is not int32/int64.
+
+    2. **Where with mixed types**: Inserts ``Cast`` to unify the X and Y
+       inputs of Where nodes when they have different element types.
+
+    Args:
+        onnx_path: Path to the ONNX file (modified in-place).
+
+    Returns:
+        Number of nodes fixed.
     """
-    vlm_keys = [k for k in state_dict if "vlm_with_expert.vlm." in k or k.startswith("model.vlm_with_expert.vlm.")]
-    expert_keys = [k for k in state_dict if "lm_expert" in k]
+    import onnx
+    from onnx import TensorProto, helper
 
-    vlm_kv_dim = DEFAULT_VLM_KV_DIM
-    # Infer vlm_kv_dim from any cross-attention k_proj whose input != expert hidden
-    for k in expert_keys:
-        if "self_attn.k_proj.weight" in k:
-            shape = state_dict[k].shape
-            # Cross-attn layers have kv_in == vlm_kv_dim (≠ expert_hidden)
-            expert_hidden_candidates = [
-                state_dict[ek].shape[0]
-                for ek in state_dict
-                if ek.endswith("action_in_proj.weight")
-            ]
-            if expert_hidden_candidates:
-                expert_hidden = expert_hidden_candidates[0]
-                if shape[1] != expert_hidden:
-                    vlm_kv_dim = shape[1]
-                    break
+    model = onnx.load(str(onnx_path))
 
-    return {
-        "vlm_kv_dim": vlm_kv_dim,
-        "vlm_key_count": len(vlm_keys),
-        "expert_key_count": len(expert_keys),
-    }
+    # Build type map from value_info, inputs, and initializers
+    type_map: dict[str, int] = {}
+    for vi in model.graph.value_info:
+        if vi.type.tensor_type.elem_type:
+            type_map[vi.name] = vi.type.tensor_type.elem_type
+    for inp in model.graph.input:
+        if inp.type.tensor_type.elem_type:
+            type_map[inp.name] = inp.type.tensor_type.elem_type
+    for init in model.graph.initializer:
+        type_map[init.name] = init.data_type
+
+    cast_nodes_to_insert: list[tuple[int, Any]] = []
+    fixed_count = 0
+
+    for i, node in enumerate(model.graph.node):
+        # Fix 1: Gather with non-integer indices
+        if node.op_type == "Gather" and len(node.input) >= 2:
+            idx_type = type_map.get(node.input[1])
+            if idx_type is not None and idx_type not in (
+                TensorProto.INT32,
+                TensorProto.INT64,
+            ):
+                cast_out = f"{node.input[1]}_cast_to_int64"
+                cast_node = helper.make_node(
+                    "Cast", [node.input[1]], [cast_out], to=TensorProto.INT64
+                )
+                cast_nodes_to_insert.append((i, cast_node))
+                node.input[1] = cast_out
+                fixed_count += 1
+                logger.debug(
+                    "Fixed Gather %s: cast indices to INT64", node.name
+                )
+
+        # Fix 2: Where with mixed X/Y types
+        if node.op_type == "Where" and len(node.input) == 3:
+            _cond, x_name, y_name = node.input
+            x_type = type_map.get(x_name)
+            y_type = type_map.get(y_name)
+            if (
+                x_type is not None
+                and y_type is not None
+                and x_type != y_type
+            ):
+                # Cast the integer input to match the float input
+                if x_type == TensorProto.INT64 and y_type == TensorProto.FLOAT:
+                    cast_out = f"{x_name}_cast_to_float"
+                    cast_node = helper.make_node(
+                        "Cast", [x_name], [cast_out], to=TensorProto.FLOAT
+                    )
+                    cast_nodes_to_insert.append((i, cast_node))
+                    node.input[1] = cast_out
+                    fixed_count += 1
+                elif y_type == TensorProto.INT64 and x_type == TensorProto.FLOAT:
+                    cast_out = f"{y_name}_cast_to_float"
+                    cast_node = helper.make_node(
+                        "Cast", [y_name], [cast_out], to=TensorProto.FLOAT
+                    )
+                    cast_nodes_to_insert.append((i, cast_node))
+                    node.input[2] = cast_out
+                    fixed_count += 1
+                logger.debug(
+                    "Fixed Where %s: unified types", node.name
+                )
+
+    # Insert cast nodes in correct order (track offset as we insert)
+    for offset, (insert_idx, cast_node) in enumerate(
+        sorted(cast_nodes_to_insert, key=lambda x: x[0])
+    ):
+        model.graph.node.insert(insert_idx + offset, cast_node)
+
+    if fixed_count > 0:
+        onnx.save(model, str(onnx_path))
+        logger.info("Patched %d type mismatches in %s", fixed_count, onnx_path)
+
+    return fixed_count
 
 
 def export_vlm_prefix(
-    checkpoint_path_or_id: str,
-    output_dir: str | Path,
+    checkpoint_path_or_id: str = DEFAULT_VLM_MODEL_NAME,
+    output_dir: str | Path = ".",
     opset: int = 19,
 ) -> Path:
-    """Export VLM prefix encoder as ONNX.
+    """Export VLM vision encoder (SigLIP + connector) as ONNX.
 
-    Loads a SmolVLA checkpoint, extracts the VLM-side weights, builds a
-    ``VLMPrefixEncoder``, exports to ONNX, and validates numerically.
+    Loads the base SmolVLM2-500M model via ``AutoModel.from_pretrained``,
+    wraps the vision encoder + connector into ``VisionEncoderForONNX``,
+    exports to ONNX, patches any type mismatches, and validates against
+    ONNX Runtime.
 
     Args:
-        checkpoint_path_or_id: Local path or HuggingFace Hub model ID.
+        checkpoint_path_or_id: HuggingFace model ID or local path.
+            Defaults to ``HuggingFaceTB/SmolVLM2-500M-Video-Instruct``.
         output_dir: Directory for output files.
         opset: ONNX opset version (default 19).
 
     Returns:
-        Path to the exported ``vlm_prefix.onnx`` file.
+        Path to the exported ``vision_encoder.onnx`` file.
     """
+    from transformers import AutoModel
+
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    # 1. Load checkpoint
-    logger.info("Loading checkpoint: %s", checkpoint_path_or_id)
-    state_dict, model_config = load_checkpoint(checkpoint_path_or_id)
-    total_params = sum(v.numel() for v in state_dict.values())
-    logger.info("Loaded %d tensors, %.1fM params total", len(state_dict), total_params / 1e6)
+    # 1. Load the base VLM
+    logger.info("Loading VLM: %s", checkpoint_path_or_id)
+    model = AutoModel.from_pretrained(
+        checkpoint_path_or_id, trust_remote_code=True
+    )
+    model.eval()
 
-    # 2. Detect VLM config from checkpoint structure
-    vlm_info = _detect_vlm_config(state_dict)
-    vlm_kv_dim = vlm_info["vlm_kv_dim"]
+    # Extract architecture constants from the loaded model
+    vision_config = model.config.vision_config
+    text_config = model.config.text_config
+    image_size = vision_config.image_size
+    vlm_kv_dim = text_config.hidden_size  # 960
+
     logger.info(
-        "VLM config: vlm_kv_dim=%d, vlm_keys=%d, expert_keys=%d",
-        vlm_kv_dim, vlm_info["vlm_key_count"], vlm_info["expert_key_count"],
+        "VLM config: image_size=%d, vision_hidden=%d, text_hidden(vlm_kv_dim)=%d",
+        image_size,
+        vision_config.hidden_size,
+        vlm_kv_dim,
     )
 
-    # 3. Determine image size from model config or default
-    image_size = DEFAULT_IMAGE_SIZE
-    if isinstance(model_config, dict):
-        # SmolVLM2 stores image size in vision_config
-        vision_cfg = model_config.get("vision_config", {})
-        if "image_size" in vision_cfg:
-            image_size = vision_cfg["image_size"]
-    logger.info("Using image_size=%d", image_size)
-
-    # 4. Build VLMPrefixEncoder (v1 stub — does not use real VLM weights)
-    encoder = VLMPrefixEncoder(
-        vlm_state_dict=None,  # stub ignores weights for now
-        image_size=image_size,
-        vlm_kv_dim=vlm_kv_dim,
+    # 2. Build the ONNX-exportable wrapper
+    wrapper = VisionEncoderForONNX(
+        model.vision_model, model.connector, image_size=image_size
     )
-    encoder.eval()
-    logger.info(
-        "Built VLMPrefixEncoder (stub): %.3fM params",
-        sum(p.numel() for p in encoder.parameters()) / 1e6,
-    )
+    wrapper.eval()
 
-    # 5. Create dummy inputs
-    dummy_image = torch.randn(1, image_size, image_size, 3)
-    dummy_ids = torch.randint(0, 1000, (1, DEFAULT_INSTRUCTION_SEQ_LEN), dtype=torch.int64)
+    total_params = sum(p.numel() for p in wrapper.parameters())
+    logger.info("VisionEncoderForONNX: %.1fM params", total_params / 1e6)
 
-    # 6. Export to ONNX
-    onnx_path = output_dir / "vlm_prefix.onnx"
+    # 3. Verify wrapper matches original model output
+    dummy_pixel_values = torch.randn(1, 3, image_size, image_size)
+    with torch.no_grad():
+        # Original model path
+        orig_hidden = model.vision_model(
+            pixel_values=dummy_pixel_values
+        ).last_hidden_state
+        orig_embeds = model.connector(orig_hidden)
+        # Wrapper path
+        wrapper_embeds = wrapper(dummy_pixel_values)
+        sanity_diff = float((orig_embeds - wrapper_embeds).abs().max())
+        logger.info("Wrapper vs original sanity check: max_diff=%.2e", sanity_diff)
+        assert sanity_diff == 0.0, (
+            f"Wrapper output differs from original: {sanity_diff}"
+        )
+
+    # 4. Export to ONNX
+    onnx_path = output_dir / "vision_encoder.onnx"
     logger.info("Exporting ONNX to %s (opset %d)...", onnx_path, opset)
     with torch.no_grad():
         torch.onnx.export(
-            encoder,
-            (dummy_image, dummy_ids),
+            wrapper,
+            dummy_pixel_values,
             str(onnx_path),
-            input_names=["image", "instruction_ids"],
-            output_names=["prefix_kv"],
+            input_names=["pixel_values"],
+            output_names=["image_embeds"],
             dynamic_axes={
-                "image": {0: "batch"},
-                "instruction_ids": {0: "batch", 1: "seq"},
-                "prefix_kv": {0: "batch"},
+                "pixel_values": {0: "batch"},
+                "image_embeds": {0: "batch"},
             },
             opset_version=opset,
-            do_constant_folding=True,
+            do_constant_folding=False,
         )
-    logger.info("Wrote %s (%.2f MB)", onnx_path, onnx_path.stat().st_size / 1e6)
+    onnx_size_mb = onnx_path.stat().st_size / 1e6
+    logger.info("Wrote %s (%.2f MB)", onnx_path, onnx_size_mb)
 
-    # 7. Validate: PyTorch vs ONNX Runtime
+    # 5. Post-export: patch type mismatches (Gather float indices, Where mixed types)
+    num_fixed = patch_onnx_type_mismatches(onnx_path)
+    logger.info("Post-export patch: fixed %d nodes", num_fixed)
+
+    # 6. Validate: PyTorch vs ONNX Runtime
     try:
-        import onnxruntime as ort
         import numpy as np
+        import onnxruntime as ort
 
         sess = ort.InferenceSession(str(onnx_path))
         with torch.no_grad():
-            torch_out = encoder(dummy_image, dummy_ids).numpy()
-        ort_out = sess.run(None, {
-            "image": dummy_image.numpy(),
-            "instruction_ids": dummy_ids.numpy(),
-        })[0]
+            torch_out = wrapper(dummy_pixel_values).numpy()
+        ort_out = sess.run(
+            None, {"pixel_values": dummy_pixel_values.numpy()}
+        )[0]
         max_diff = float(np.abs(torch_out - ort_out).max())
-        passed = max_diff < 1e-4
-        logger.info("ONNX validation: max_diff=%.2e (%s)", max_diff, "PASS" if passed else "FAIL")
+        mean_diff = float(np.abs(torch_out - ort_out).mean())
+        passed = max_diff < ORT_MAX_DIFF_THRESHOLD
+        logger.info(
+            "ONNX validation: max_diff=%.2e, mean_diff=%.2e (%s)",
+            max_diff,
+            mean_diff,
+            "PASS" if passed else "FAIL",
+        )
         if not passed:
             logger.warning(
-                "ONNX numerical mismatch: max_diff=%.2e exceeds 1e-4 threshold", max_diff
+                "ONNX numerical mismatch: max_diff=%.2e exceeds %.1e threshold "
+                "(SigLIP has 27 transformer layers -- some fp32 drift is expected)",
+                max_diff,
+                ORT_MAX_DIFF_THRESHOLD,
             )
     except ImportError:
-        logger.warning("onnxruntime not installed — skipping ONNX validation")
+        logger.warning("onnxruntime not installed -- skipping ONNX validation")
 
-    # 8. Write / update reflex_config.json
+    # 7. Write / update reflex_config.json
     config_path = output_dir / "reflex_config.json"
     config: dict[str, Any] = {}
     if config_path.exists():
@@ -258,9 +346,8 @@ def export_vlm_prefix(
 
     config["vlm_image_size"] = [image_size, image_size]
     config["vlm_kv_dim"] = vlm_kv_dim
-    config["vlm_prefix_onnx"] = "vlm_prefix.onnx"
-    config["vlm_prefix_seq_len"] = DEFAULT_PREFIX_SEQ_LEN
-    config["export_version"] = "0.2"
+    config["vlm_prefix_onnx"] = "vision_encoder.onnx"
+    config["export_version"] = "0.3"
 
     config_path.write_text(json.dumps(config, indent=2))
     logger.info("Updated config: %s", config_path)
