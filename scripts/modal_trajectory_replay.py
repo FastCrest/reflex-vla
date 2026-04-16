@@ -300,13 +300,14 @@ def run_trajectory_replay():
                     json={
                         "image": img_b64,
                         "instruction": instruction,
+                        "state": [0.0] * 6,
                     },
                     timeout=30,
                 )
                 result = resp.json()
 
                 if "error" in result:
-                    # Server returned error, skip
+                    print(f"  /act error at ep={ep_idx} step={step_i}: {result['error']}")
                     continue
 
                 pred_actions = np.array(result["actions"], dtype=np.float32)
