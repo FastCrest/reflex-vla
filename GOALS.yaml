@@ -9,6 +9,11 @@ goals:
     check: "test -f src/reflex/exporters/vlm_prefix_exporter.py && grep -q 'AutoModel\\|from_pretrained' src/reflex/exporters/vlm_prefix_exporter.py 2>/dev/null && ! grep -q 'AdaptiveAvgPool2d' src/reflex/exporters/vlm_prefix_exporter.py 2>/dev/null"
     weight: 10
 
+  - id: text-embedder-onnx
+    description: "reflex export produces text_embedder.onnx (real SmolLM2 embed_tokens) so text encoding uses real embeddings not seeded-random fallback"
+    check: "grep -q 'text_embedder' src/reflex/exporters/vlm_prefix_exporter.py 2>/dev/null && grep -q 'embed_tokens' src/reflex/exporters/vlm_prefix_exporter.py 2>/dev/null"
+    weight: 10
+
   # ── HIGH (weight 8-9) ─────────────────────────────────────────────
 
   - id: distill-dmpo
