@@ -492,7 +492,7 @@ def benchmark_cmd(
     benchmark: str = typer.Option(
         "",
         "--benchmark",
-        help="Also run task-success eval: libero_10, simpler, maniskill (requires pip install 'reflex-vla[eval]')",
+        help="Also run task-success eval: simpler, maniskill (requires pip install 'reflex-vla[eval]'). LIBERO archived 2026-04-17 — see archive/scripts/.",
     ),
     episodes_per_task: int = typer.Option(
         10, help="Episodes per task for --benchmark (full suites use 50)"
@@ -505,8 +505,12 @@ def benchmark_cmd(
     reports mean/p50/p95/p99 latency.
 
     With --benchmark <suite>: also runs task-success evaluation on the named
-    simulation benchmark (LIBERO-10, SimplerEnv, ManiSkill). Requires the
-    [eval] extra — sim dependencies are not in the base install.
+    simulation benchmark (SimplerEnv, ManiSkill). Requires the [eval] extra —
+    sim dependencies are not in the base install.
+
+    LIBERO was archived on 2026-04-17 — reflex's product wedge is deployment
+    parity + latency, not sim benchmarking. Archived scripts live at
+    archive/scripts/ if you want to resurrect them.
     """
     _setup_logging(verbose)
     import time as _t
@@ -533,8 +537,7 @@ def benchmark_cmd(
                 f"  Or run without --benchmark for latency-only.",
             )
             raise typer.Exit(2)
-        valid = ("libero_10", "libero_spatial", "libero_object", "libero_goal",
-                 "libero_long", "simpler", "maniskill")
+        valid = ("simpler", "maniskill")
         if benchmark not in valid:
             console.print(f"[red]Unknown benchmark '{benchmark}'. Try one of: {', '.join(valid)}[/red]")
             raise typer.Exit(2)
@@ -611,8 +614,7 @@ def benchmark_cmd(
         except ImportError as exc:
             console.print(
                 f"[red]reflex.eval module missing: {exc}[/red]\n"
-                f"  The benchmark-plugin framework ships in v0.2 — see GOALS.yaml.\n"
-                f"  For now, use scripts/modal_libero10.py to run LIBERO-10 on Modal."
+                f"  The benchmark-plugin framework ships in v0.2 — see GOALS.yaml."
             )
             raise typer.Exit(2)
 

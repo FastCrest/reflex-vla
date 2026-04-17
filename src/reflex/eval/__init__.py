@@ -32,13 +32,10 @@ def run_task_benchmark(
         duration_s: wall-clock seconds
     """
     if benchmark.startswith("libero"):
-        from reflex.eval.libero import run_libero
-        return run_libero(
-            suite=benchmark,
-            export_dir=export_dir,
-            episodes_per_task=episodes_per_task,
-            device=device,
-            **kwargs,
+        raise ValueError(
+            "LIBERO was archived on 2026-04-17. Reflex's product wedge is "
+            "deployment parity + latency, not sim benchmarking. "
+            "Archived scripts live at archive/scripts/ if you want to resurrect them."
         )
     if benchmark == "simpler":
         from reflex.eval.simpler import run_simpler

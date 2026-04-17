@@ -76,10 +76,14 @@ image = (
         "opencv-python-headless",
         "gym",                # LIBERO's venv.py uses old `gym`, not gymnasium
     )
+    # lerobot installed AFTER robomimic (so robomimic's egl_probe can use apt
+    # cmake) but BEFORE the LIBERO editable install (so lerobot's deps don't
+    # invalidate LIBERO's .pth file).
+    .pip_install("lerobot", "num2words")
     .add_local_file("scripts/patch_libero.py", "/root/patch_libero.py", copy=True)
     .run_commands(
         "git clone https://github.com/Lifelong-Robot-Learning/LIBERO.git /opt/LIBERO"
-        " && cd /opt/LIBERO && pip install -e ."
+        " && cd /opt/LIBERO && pip install . --no-deps"
         # Patch LIBERO's interactive input() prompts so import doesn't hang.
         " && python /root/patch_libero.py"
         " && python -c 'from libero.libero import benchmark; print(\"LIBERO import OK\")'"
@@ -186,6 +190,10 @@ def run_libero10():
         "REFLEX_ACTION_DIM_OUT": "7",  # LIBERO: 6 joints + gripper
         "REFLEX_DEVICE": "cuda",       # A10G GPU available
         "MUJOCO_GL": "osmesa",
+        # Route to the native PyTorch SmolVLA path — bypasses the decomposed
+        # ONNX export (which hits per-step 2% velocity drift) and runs lerobot
+        # SmolVLAPolicy directly. ONNX export still shipped for Jetson/TRT.
+        "REFLEX_NATIVE": "1",
     }
     # Route server stdout to a file so we can print it on error.
     server_log_path = "/tmp/adapter_server.log"
@@ -312,13 +320,12 @@ def run_libero10():
                 "subname": "libero_10",
                 "mode": "sync",
                 # 1 ep / task × 10 tasks = 10 total. Fast iteration.
+                # Single-task quick-check mode: 1 task × 1 ep = ~5 min total
+                # instead of 30+ min for all 10 tasks. Bump after first real
+                # non-zero number proves the pipeline works.
                 "episodes_per_task": 1,
-                # 150 steps for fast iteration. The model should produce some
-                # task progress within 150 steps if it's working at all —
-                # picking bowls / reaching for objects. If we see ZERO task
-                # success AND no visible progress at 150, bumping to 600 won't
-                # help because the policy is clearly incorrect.
-                "max_steps": 150,
+                "max_steps": 300,
+                "task_order": [0],  # single task only — first LIBERO-10 task
                 "params": {
                     "suite": "libero_10",
                     "seed": 7,
