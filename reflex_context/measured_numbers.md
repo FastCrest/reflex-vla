@@ -21,6 +21,7 @@ Reproducible on a fresh clone with the linked script at the linked commit. These
 | 2026-04-17 | Per-layer vlm_k (decomposed path) | cos = 1.0000 | `scripts/local_stage_diff.py` | `0616265` |
 | 2026-04-17 | Single self-attn layer (layer 0, isolated weight copy) | cos = 1.0000 to 1e-5 | `scripts/local_single_layer_diff.py` | `0616265` |
 | 2026-04-17 | Optimum-exported tiny Gemma ONNX vs PyTorch (`text-generation-with-past`) | cos = +1.00000000, max_abs_diff = 7.15e-07, KV diff = 1.79e-07 | `scripts/local_tiny_gemma_sanity.py` (per-layer K/V exposed as `present.N.key/value` outputs) | `85c24c0` |
+| 2026-04-17 | **pi0's actual 2.51B Gemma backbone** (extracted from pi0_base) exported via Optimum ONNX vs PyTorch | **cos = +0.99999994**, logits max_abs_diff = 3.86e-05, present.17.key (deepest layer) max_diff = 3.02e-05 | Pi0's `paligemma_with_expert.paligemma.model.language_model.*` state-dict subset loaded into `GemmaForCausalLM`, exported via `optimum-cli export onnx --task text-generation-with-past`, 10GB on-disk, 9.3GB external-data ONNX | `f67a012` (Day 2 empirical) |
 
 **Headline claim:** "Reflex's native export path matches the reference PyTorch policy to cos = 1.0000 end-to-end on SmolVLA." This is the only number load-bearing for the product pitch today.
 

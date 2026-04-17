@@ -83,6 +83,47 @@ Optimum does NOT support `smolvlm` model type (confirmed via empirical export at
 
 **But:** we learned Optimum DOES support `gemma` and `siglip` as separate architectures. That's the unlock.
 
+## Day 2 LATE — pi0's actual Gemma backbone at 2.51B scale PASSED
+
+After the xet-bridge download of vanilla Gemma-2b kept stalling, we bypassed HF entirely by:
+1. Extracting pi0's Gemma backbone state-dict subset (prefix `paligemma_with_expert.paligemma.model.language_model.*`) from the already-cached 14GB `pi0_base` safetensors
+2. Building a `GemmaForCausalLM` with GemmaConfig(hidden=2048, 18 layers, 8 q-heads, 1 kv-head, head_dim=256)
+3. Loading pi0's 163 backbone keys into the model (only `embed_tokens.weight` missing — random-init, doesn't affect parity test)
+4. Saving as a standard HF model dir at `/tmp/pi0_gemma_backbone` (10GB on disk)
+5. Running `optimum-cli export onnx --model /tmp/pi0_gemma_backbone --task text-generation-with-past`
+
+**Result on real-scale (2.51B params):**
+
+```
+Export: succeeded, 9.3GB external-data ONNX + 837K .onnx model structure file
+       (external-data format auto-used — bypasses 2GB protobuf limit)
+
+Parity:
+  logits max_abs_diff:  3.86e-05  (26× below 1e-3 target)
+  logits mean_abs_diff: 5.13e-06
+  logits cos_sim:       +0.99999994
+  present.0.key  diff:  1.24e-05  (first layer)
+  present.17.key diff:  3.02e-05  (deepest layer — precision DOES accumulate but bounded)
+
+VERDICT: PASS
+```
+
+**What this validates at real scale:**
+
+1. ✅ Optimum exports the FULL Gemma-2b (2.51B params) cleanly — not just tiny-scale
+2. ✅ External-data format (>2GB protobuf limit) works automatically
+3. ✅ All 18 layers of K/V cache exposed as named outputs
+4. ✅ Pi0's fine-tuned Gemma weights load cleanly into standard HF `GemmaForCausalLM` — architecture matches exactly
+5. ✅ Precision accumulates across layers but stays well under our 1e-3 max_abs target
+6. ✅ cos = 0.99999994 — exceeds 0.9999 target with comfortable headroom
+
+**Mess-up probability after real-scale validation: ~10-15%** (was 20-25%).
+
+The single biggest unknown is resolved. Remaining risk:
+- Custom pi0 glue code (expert stack + flow matching + composition) — new bugs live here
+- SigLIP export — untested (xet-bridge still blocked; can extract from pi0_base like we did for Gemma)
+- Orin TRT 10.3 numerical bugs (~5%, untestable without hardware)
+
 ## Day 2 — tiny-Gemma Optimum sanity PASSED
 
 Ran `scripts/local_tiny_gemma_sanity.py` to verify the Optimum + Gemma + KV-extraction path without waiting on the slow xet-bridge download of the real Gemma-2b weights.
