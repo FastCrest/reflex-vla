@@ -68,6 +68,11 @@ goals:
     check: "grep -q 'replan_hz\\|sliding_window\\|action_buffer' src/reflex/runtime/server.py 2>/dev/null"
     weight: 7
 
+  - id: docker-image-distribution
+    description: "ghcr.io/rylinjames/reflex:<version>-<target> images published per release. Zero-install path: docker pull + docker run. Images for orin-nano, orin, thor, desktop. MVP-adoption tablestakes — first-hour experience goes from 4 hours of install to 60 seconds."
+    check: "test -f .github/workflows/docker-publish.yml"
+    weight: 7
+
   # ── MEDIUM (weight 5-6) ───────────────────────────────────────────
 
   - id: latency-histograms
@@ -83,6 +88,11 @@ goals:
   - id: export-verification-report
     description: "Every reflex export auto-writes <export_dir>/VERIFICATION.md with per-stage cos, L2, max_abs, ONNX sizes, opset, target-hardware compat, provenance hash. 'Ship a receipt, not just a binary.'"
     check: "grep -q 'VERIFICATION.md\\|verification_report' src/reflex/exporters/*.py 2>/dev/null"
+    weight: 6
+
+  - id: quickstart-docs
+    description: "README front page delivers 3-command quickstart (install / export / serve) that works on a fresh box in under 5 minutes. Plus docs/getting_started.md covering the 5 most common customer scenarios. MVP-adoption tablestakes."
+    check: "test -f docs/getting_started.md && grep -q 'Quickstart' README.md && grep -c '```bash' docs/getting_started.md | grep -q '[3-9]'"
     weight: 6
 
   - id: adaptive-denoise-fix
