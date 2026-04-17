@@ -196,6 +196,92 @@ def build_gemma_dir(state: dict[str, torch.Tensor], out_dir: Path) -> Path:
     return out_dir
 
 
+class GemmaFromEmbeds(nn.Module):
+    """Thin wrapper around GemmaModel that takes inputs_embeds (skips embed_tokens).
+
+    pi0 fuses vision + text embeddings BEFORE passing to the decoder. Optimum's
+    Gemma export via `text-generation-with-past` takes `input_ids` (and internally
+    applies embed_tokens). We need the embeddings-in variant.
+
+    Output: `last_hidden_state` + a flat list of per-layer `present.{i}.key/value`
+    tensors, matching the ONNX shape our Pi0OnnxServer expects.
+    """
+
+    def __init__(self, gemma_model: nn.Module):
+        super().__init__()
+        # gemma_model is transformers.GemmaModel (NOT GemmaForCausalLM).
+        self.model = gemma_model
+
+    def forward(
+        self,
+        inputs_embeds: torch.Tensor,
+        attention_mask: torch.Tensor,
+    ) -> tuple[torch.Tensor, ...]:
+        # Forward through Gemma's transformer layers with no past_key_values
+        # (fresh prefill). Request use_cache=True so present K/V are returned.
+        out = self.model(
+            inputs_embeds=inputs_embeds,
+            attention_mask=attention_mask,
+            use_cache=True,
+            return_dict=True,
+        )
+        last_hidden = out.last_hidden_state
+        # DynamicCache -> flatten to per-layer tensors
+        kv = out.past_key_values
+        outs = [last_hidden]
+        num_layers = self.model.config.num_hidden_layers
+        if hasattr(kv, "layers"):
+            for i in range(num_layers):
+                outs.append(kv.layers[i].keys)
+                outs.append(kv.layers[i].values)
+        else:
+            # Legacy tuple format
+            for i in range(num_layers):
+                outs.append(kv[i][0])
+                outs.append(kv[i][1])
+        return tuple(outs)
+
+
+def build_and_export_gemma_from_embeds(
+    gemma_pt_dir: Path,
+    out_path: Path,
+) -> Path:
+    """Build GemmaFromEmbeds wrapper from saved Gemma dir, export to ONNX."""
+    from transformers import GemmaForCausalLM
+
+    full = GemmaForCausalLM.from_pretrained(gemma_pt_dir).eval()
+    wrapper = GemmaFromEmbeds(full.model).eval()
+    num_layers = full.config.num_hidden_layers
+
+    # Dummy inputs matching expected Gemma dims (pi0: hidden=2048)
+    B, seq = 1, 16
+    hidden = full.config.hidden_size
+    dummy_embeds = torch.randn(B, seq, hidden, dtype=torch.float32)
+    dummy_mask = torch.ones(B, seq, dtype=torch.long)
+
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    output_names = ["last_hidden_state"]
+    for i in range(num_layers):
+        output_names += [f"present.{i}.key", f"present.{i}.value"]
+    torch.onnx.export(
+        wrapper,
+        (dummy_embeds, dummy_mask),
+        out_path,
+        input_names=["inputs_embeds", "attention_mask"],
+        output_names=output_names,
+        dynamic_axes={
+            "inputs_embeds": {0: "batch", 1: "seq"},
+            "attention_mask": {0: "batch", 1: "seq"},
+            "last_hidden_state": {0: "batch", 1: "seq"},
+            **{f"present.{i}.{kv}": {0: "batch", 2: "seq"}
+               for i in range(num_layers) for kv in ("key", "value")},
+        },
+        opset_version=19,
+    )
+    logger.info("Exported GemmaFromEmbeds: %s", out_path)
+    return out_path
+
+
 class Pi0ExpertStackWithPrefix(nn.Module):
     """Pi0 expert stack that consumes per-layer VLM prefix-KV.
 
