@@ -22,9 +22,29 @@ goals:
     weight: 9
 
   - id: multi-model-native-parity
-    description: "Native export path with cos=1.0000 parity on SmolVLA AND pi0 AND pi0.5 AND GR00T (not just SmolVLA). Same DecomposedRMSNorm-swap pattern, 4x the moat."
+    description: "PyTorch-native path produces cos=1.0000 vs the reference PyTorch policy for all 4 flow-matching VLAs (SmolVLA, pi0, pi0.5, GR00T). Decomposition strategy differs per model: SmolVLA needs Llama-family RMSNorm swap; pi0 needs no swap (PiGemmaRMSNorm already elementwise); pi0.5 needs AdaRMSNorm swap; GR00T needs AdaLN swap. Native is the PyTorch-only A10G/H100 deployment target. ONNX-for-Jetson tracked separately per model (see *-onnx-parity goals below)."
     check: "test -f tests/test_native_parity.py && .venv/bin/python -m pytest tests/test_native_parity.py -q 2>/dev/null"
     weight: 9
+
+  - id: pi0-onnx-parity
+    description: "End-to-end pi0 ONNX export produces cos >= 0.999 vs reference PyTorch sample_actions on shared noise. Covers PaliGemma vision + Gemma language backbone + Gemma expert + flow matching loop. src/reflex/exporters/pi0_exporter.py (584 lines) exists but cos-parity has never been verified on shared-noise discipline. The cross-framework moat for pi0 — one of 4 models claimed to work."
+    check: "test -f tests/test_pi0_onnx_parity.py && .venv/bin/python -m pytest tests/test_pi0_onnx_parity.py -q 2>/dev/null"
+    weight: 9
+
+  - id: pi05-onnx-parity
+    description: "End-to-end pi0.5 ONNX export produces cos >= 0.999 vs reference PyTorch sample_actions. Requires AdaRMSNorm handling (DecomposedAdaRMSNorm exists in decompose.py). pi0_exporter.py export_pi05 is flagged 'not yet supported' pending this work."
+    check: "test -f tests/test_pi05_onnx_parity.py && .venv/bin/python -m pytest tests/test_pi05_onnx_parity.py -q 2>/dev/null"
+    weight: 7
+
+  - id: gr00t-onnx-parity
+    description: "End-to-end NVIDIA GR00T N1.6 ONNX export produces cos >= 0.999 vs reference PyTorch. Requires DiT + AdaLN (2-chunk scale+shift) handling. src/reflex/exporters/gr00t_exporter.py (756 lines) exists; cos-parity never verified under shared-noise discipline."
+    check: "test -f tests/test_gr00t_onnx_parity.py && .venv/bin/python -m pytest tests/test_gr00t_onnx_parity.py -q 2>/dev/null"
+    weight: 7
+
+  - id: openvla-onnx-parity
+    description: "OpenVLA (7.5B, tokenized action head, not flow matching) ONNX export + postprocess helper produces matching actions vs reference. Different path than the flow-matching VLAs — uses optimum-cli + our bin-to-continuous decoder. Parity verified with shared tokenized-action samples."
+    check: "test -f tests/test_openvla_onnx_parity.py && .venv/bin/python -m pytest tests/test_openvla_onnx_parity.py -q 2>/dev/null"
+    weight: 4
 
   - id: jetson-benchmark-ci
     description: "GitHub Action runs reflex bench on real Jetson hardware (CloudJetson or loaner) every commit, publishes ms/step per target to a public dashboard. Turns Leg B from static claim into per-commit proof."
