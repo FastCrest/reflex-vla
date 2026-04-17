@@ -117,6 +117,7 @@ Note: `01_architecture`, `02_bugs_fixed`, `03_research`, `04_iteration_lessons`,
 - Can I just use `torch.onnx.export` directly? → `03_research/direct_torch_export_viability.md` (answer: yes for attention/RoPE/GQA; no for RMSNorm on Jetson TRT until opset 23 support lands in the ONNX parser)
 - What's our distillation recipe? → `03_research/pi_flow_vs_dmpo.md` (pi-Flow → DMPO as of Apr-16)
 - How do I get cheap Jetson access? → `03_research/hardware_alternatives.md` (CloudJetson.com ~$5/session, used Orin Nano Super $200-240)
+- **What code can I import for pi0-onnx-parity?** → `03_research/pi0_onnx_importable_sources.md` (15+ sources tiered by license risk; ~25–35 day savings possible)
 - What's the LeRobot issue we're closing? → `_raw/modal_apps_and_pm_docs.md` § LeRobot #3146
 
 **Iteration / workflow**

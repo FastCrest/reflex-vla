@@ -29,7 +29,7 @@ Priority order reflects dependency + moat impact, not raw weight.
 | 3 | `text-embedder-onnx` | 10 | ✅ done | 0 | check passes |
 | 4 | `quickstart-docs` | 6 | ✅ done | 0 | check passes; may still need polish pre-launch |
 | 5 | `smolvla-onnx-parity` | 9 | ❌ blocked | ~1w | ONNX path cos≥0.999 vs PyTorch ref — the real Jetson customer claim |
-| 6 | `pi0-onnx-parity` | 9 | ❌ blocked | 1–2w | shared-noise cos verification on existing pi0_exporter.py |
+| 6 | `pi0-onnx-parity` | 9 | ❌ blocked | 1.5–3w | revised after deep research (2026-04-17). ~25–35 engineer-days importable from openpi_on_thor + Tacoin + Isaac-GR00T + Optimum PaliGemma2. ETA depends on NVIDIA license clarity. See [03_research/pi0_onnx_importable_sources.md](03_research/pi0_onnx_importable_sources.md). |
 | 7 | `jetson-benchmark-ci` | 9 | ❌ blocked | 2–3d | Amazon-return Orin Nano $249 + community bounty ($20–50) in parallel |
 | 8 | `multi-model-native-parity` | 9 | ❌ blocked | follows #6 | pi0/pi0.5/GR00T native parity; pi0 = trivial (no swap), pi0.5 + GR00T need AdaRMSNorm / AdaLN verification |
 | 9 | `ros2-bridge` | 8 | ❌ blocked | ~1w | `reflex serve --ros2` wrapping /act with rclpy action server |
@@ -37,7 +37,7 @@ Priority order reflects dependency + moat impact, not raw weight.
 | 11 | `docker-image-distribution` | 7 | ❌ blocked | ~2d | `ghcr.io/rylinjames/reflex:<version>-<target>` per-release images |
 | 12 | `export-verification-report` | 6 | ❌ blocked | ~3d | auto-write `<export_dir>/VERIFICATION.md` with cos/L2/opset/hash receipt |
 
-**Total remaining: 8 goals, ~5–8 weeks solo** (added smolvla-onnx-parity ~1w).
+**Total remaining: 8 goals, ~4.5–8 weeks solo** (pi0-onnx-parity re-scoped down 1–2w after research imports).
 
 ---
 
