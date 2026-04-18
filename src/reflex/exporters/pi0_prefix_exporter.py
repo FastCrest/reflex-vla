@@ -93,6 +93,24 @@ DEFAULT_GEMMA_CFG = dict(
     rope_theta=10000.0,
 )
 
+# Expert is gemma-300m (smaller variant) — pi0's action expert config
+DEFAULT_GEMMA_EXPERT_CFG = dict(
+    vocab_size=257152,  # same tokenizer as backbone
+    hidden_size=1024,
+    intermediate_size=4096,
+    num_hidden_layers=18,
+    num_attention_heads=8,
+    num_key_value_heads=1,
+    head_dim=256,
+    max_position_embeddings=8192,
+    rms_norm_eps=1e-6,
+    rope_theta=10000.0,
+)
+
+
+# Pi0 expert state-dict prefix
+PI0_EXPERT_PREFIX = "paligemma_with_expert.gemma_expert.model."
+
 
 def load_pi0_state_dict(model_id: str = "lerobot/pi0_base") -> dict[str, torch.Tensor]:
     """Load the full pi0 state dict from HF cache (or download)."""
@@ -146,6 +164,53 @@ def build_siglip_dir(state: dict[str, torch.Tensor], out_dir: Path) -> Path:
             "resample": 3,
             "size": {"height": 224, "width": 224},
             "image_processor_type": "SiglipImageProcessor",
+        })
+    )
+    return out_dir
+
+
+def build_expert_dir(state: dict[str, torch.Tensor], out_dir: Path) -> Path:
+    """Extract pi0's action expert (gemma_expert.model) -> HF GemmaForCausalLM dir.
+
+    Pi0's expert is _PiGemmaDecoderLayerBase with PiGemmaRMSNorm. For non-pi0.5
+    (non-adaptive mode), it's numerically equivalent to standard HF
+    GemmaForCausalLM since HF's GemmaRMSNorm also uses (1+w) convention.
+    """
+    from transformers import GemmaConfig, GemmaForCausalLM
+
+    # Count actual expert layers
+    layer_ids = set()
+    for k in state:
+        if k.startswith(PI0_EXPERT_PREFIX + "layers."):
+            try:
+                idx = int(k[len(PI0_EXPERT_PREFIX + "layers."):].split(".")[0])
+                layer_ids.add(idx)
+            except ValueError:
+                continue
+    num_layers = max(layer_ids) + 1 if layer_ids else 18
+    logger.info("Pi0 expert has %d layers", num_layers)
+
+    cfg_kwargs = dict(DEFAULT_GEMMA_EXPERT_CFG)
+    cfg_kwargs["num_hidden_layers"] = num_layers
+    cfg = GemmaConfig(**cfg_kwargs)
+    model = GemmaForCausalLM(cfg).eval()
+
+    sd = {}
+    for k, v in state.items():
+        if k.startswith(PI0_EXPERT_PREFIX):
+            sd[k[len(PI0_EXPERT_PREFIX):]] = v
+    missing, unexpected = model.model.load_state_dict(sd, strict=False)
+    logger.info("Expert: loaded %d keys, missing=%d unexpected=%d",
+                len(sd), len(missing), len(unexpected))
+
+    out_dir.mkdir(parents=True, exist_ok=True)
+    model.save_pretrained(out_dir)
+    (out_dir / "tokenizer_config.json").write_text(
+        json.dumps({
+            "tokenizer_class": "GemmaTokenizer",
+            "bos_token": "<bos>",
+            "eos_token": "<eos>",
+            "pad_token": "<pad>",
         })
     )
     return out_dir
