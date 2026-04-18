@@ -347,6 +347,100 @@ def build_and_export_gemma_from_embeds(
     return out_path
 
 
+class GemmaExpertFromEmbeds(nn.Module):
+    """Like GemmaFromEmbeds but ALSO takes past_key_values as inputs.
+
+    Used for pi0's action expert: suffix (state + action_time) embeddings
+    + prefix_kv from the backbone = full attention context.
+
+    Export inputs:
+        inputs_embeds:          [B, suffix_len, hidden]
+        attention_mask:         [B, prefix_len + suffix_len]
+        past_key_values.N.key:  [B, nkv, prefix_len, head_dim] per layer
+        past_key_values.N.value: same
+    Export outputs:
+        last_hidden_state:      [B, suffix_len, hidden]
+    """
+
+    def __init__(self, gemma_model: nn.Module):
+        super().__init__()
+        self.model = gemma_model
+
+    def forward(
+        self,
+        inputs_embeds: torch.Tensor,
+        attention_mask: torch.Tensor,
+        *past_key_values_flat: torch.Tensor,
+    ) -> torch.Tensor:
+        # Reconstruct DynamicCache from flat tensor inputs
+        from transformers.cache_utils import DynamicCache
+
+        num_layers = self.model.config.num_hidden_layers
+        assert len(past_key_values_flat) == 2 * num_layers, \
+            f"expected {2*num_layers} past_kv tensors, got {len(past_key_values_flat)}"
+
+        cache = DynamicCache()
+        for i in range(num_layers):
+            k = past_key_values_flat[2 * i]
+            v = past_key_values_flat[2 * i + 1]
+            cache.update(k, v, i)
+
+        out = self.model(
+            inputs_embeds=inputs_embeds,
+            attention_mask=attention_mask,
+            past_key_values=cache,
+            use_cache=False,  # don't return updated cache; only need hidden
+            return_dict=True,
+        )
+        return out.last_hidden_state
+
+
+def build_and_export_gemma_expert_from_embeds(
+    expert_pt_dir: Path,
+    out_path: Path,
+) -> Path:
+    """Export pi0's expert (gemma-300m) with inputs_embeds + past_kv inputs."""
+    from transformers import GemmaForCausalLM
+
+    full = GemmaForCausalLM.from_pretrained(expert_pt_dir).eval()
+    wrapper = GemmaExpertFromEmbeds(full.model).eval()
+    num_layers = full.config.num_hidden_layers
+    hidden = full.config.hidden_size
+    nkv = full.config.num_key_value_heads
+    hd = full.config.head_dim
+
+    # Dummy inputs: suffix of length 51 (state=1 + chunk=50), prefix_len=16
+    B, suffix_len, prefix_len = 1, 51, 16
+    dummy_embeds = torch.randn(B, suffix_len, hidden, dtype=torch.float32)
+    dummy_mask = torch.ones(B, prefix_len + suffix_len, dtype=torch.long)
+    past_inputs = []
+    past_names = []
+    for i in range(num_layers):
+        pk = torch.randn(B, nkv, prefix_len, hd, dtype=torch.float32)
+        pv = torch.randn(B, nkv, prefix_len, hd, dtype=torch.float32)
+        past_inputs.extend([pk, pv])
+        past_names.extend([f"past_key_values.{i}.key", f"past_key_values.{i}.value"])
+
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    torch.onnx.export(
+        wrapper,
+        (dummy_embeds, dummy_mask, *past_inputs),
+        out_path,
+        input_names=["inputs_embeds", "attention_mask", *past_names],
+        output_names=["last_hidden_state"],
+        dynamic_axes={
+            "inputs_embeds": {0: "batch", 1: "suffix_len"},
+            "attention_mask": {0: "batch", 1: "total_len"},
+            "last_hidden_state": {0: "batch", 1: "suffix_len"},
+            **{name: {0: "batch", 2: "prefix_len"} for name in past_names},
+        },
+        opset_version=19,
+        dynamo=False,  # Gemma-family is broken under dynamo in 2026
+    )
+    logger.info("Exported GemmaExpertFromEmbeds: %s", out_path)
+    return out_path
+
+
 class Pi0ExpertStackWithPrefix(nn.Module):
     """Pi0 expert stack that consumes per-layer VLM prefix-KV.
 
