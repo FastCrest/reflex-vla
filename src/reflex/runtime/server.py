@@ -860,6 +860,21 @@ def create_app(
     # directly (RMSNorm still swapped for DecomposedRMSNorm for TRT-export compat
     # on the decomposed side). See reflex/runtime/smolvla_native.py.
     import os as _os
+
+    # Dispatch order:
+    #   1. REFLEX_NATIVE=1 — SmolVLANativeServer (PyTorch native path)
+    #   2. reflex_config.json export_kind == "monolithic" → model-specific
+    #      monolithic server (Pi0OnnxServer / SmolVLAOnnxServer). This is
+    #      the cos=1.0 verified production path as of 2026-04-18.
+    #   3. Default: ReflexServer (legacy decomposed path).
+    _config_path = Path(export_dir) / "reflex_config.json"
+    _monolithic_cfg = {}
+    if _config_path.exists():
+        try:
+            _monolithic_cfg = json.loads(_config_path.read_text())
+        except Exception:
+            _monolithic_cfg = {}
+
     if _os.environ.get("REFLEX_NATIVE", "0") == "1":
         from reflex.runtime.smolvla_native import SmolVLANativeServer
         server = SmolVLANativeServer(
@@ -874,6 +889,31 @@ def create_app(
             max_batch=max_batch,
             batch_timeout_ms=batch_timeout_ms,
         )
+    elif _monolithic_cfg.get("export_kind") == "monolithic":
+        _model_type = _monolithic_cfg.get("model_type", "smolvla")
+        _ort_providers = providers or (
+            ["CUDAExecutionProvider", "CPUExecutionProvider"]
+            if device == "cuda" else ["CPUExecutionProvider"]
+        )
+        if _model_type == "pi0":
+            from reflex.runtime.pi0_onnx_server import Pi0OnnxServer
+            server = Pi0OnnxServer(
+                export_dir,
+                providers=_ort_providers,
+                strict_providers=strict_providers,
+            )
+        elif _model_type == "smolvla":
+            from reflex.runtime.smolvla_onnx_server import SmolVLAOnnxServer
+            server = SmolVLAOnnxServer(
+                export_dir,
+                providers=_ort_providers,
+                strict_providers=strict_providers,
+            )
+        else:
+            raise ValueError(
+                f"Monolithic runtime for model_type={_model_type!r} not yet "
+                f"supported. v0.2 covers smolvla + pi0."
+            )
     else:
         server = ReflexServer(
             export_dir,
