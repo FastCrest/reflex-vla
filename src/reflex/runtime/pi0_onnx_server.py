@@ -1,29 +1,25 @@
-"""Pi0OnnxServer — composed 5-stage ONNX inference for pi0.
+"""Pi0OnnxServer — serves pi0 via the monolithic ONNX exported by
+scripts/modal_pi0_monolithic_export.py.
 
-Loads the 5 ONNX files produced by `export_pi0_prefix()` and runs the
-pi0 forward pass in host Python:
+The ONNX is a single-graph trace of PI0Pytorch.sample_actions with a
+fixed num_steps baked in at export time. Current ship: num_steps=1
+(cos=+1.0000000 vs PyTorch verified on 2026-04-18, Modal run 11).
 
-    1. pixel_values            -> SigLIP vision_encoder        -> vision_features
-    2. vision_features         -> multi_modal_projector        -> projected_vision
-    3. input_ids               -> text_embedder                -> text_features
-    4. concat(proj_vision, text) -> decoder_prefill(Gemma)     -> prefix_hidden + per-layer KV
-    5. noise + 10-step Euler loop:
-         for step in range(num_steps):
-            velocity = expert_stack(noisy_actions, timestep, pos_ids, prefix_k, prefix_v)
-            noisy_actions = noisy_actions + dt * velocity
-       -> final_actions
+Design: matches SmolVLANativeServer's interface (.load(), .predict())
+so the runtime is uniform across VLA families. Customers use
+`reflex serve <export_dir>` and get the same API regardless of model.
 
-Matches lerobot's PI0Pytorch.sample_actions structure. Target cos >= 0.999
-vs PyTorch reference under shared-noise discipline.
-
-Prerequisites:
-    reflex export lerobot/pi0_base --target desktop -o /tmp/pi0_export/
-    (or call src.reflex.exporters.pi0_prefix_exporter.export_pi0_prefix)
+Known limitation: num_steps is baked into the ONNX at export time.
+Changing num_steps requires re-export. Multi-step parity (num_steps=10)
+is tracked as a follow-up goal — the onnx-diagnostic + torch.export
+path hits a 835→886 shape tracer bug at num_steps>1 which is unsolved
+as of 2026-04. See reflex_context/01_architecture/pi0_monolithic_wrap_pattern.md.
 """
 from __future__ import annotations
 
 import json
 import logging
+import time
 from pathlib import Path
 from typing import Any
 
@@ -32,206 +28,187 @@ import numpy as np
 logger = logging.getLogger(__name__)
 
 
-DEFAULT_NUM_DENOISE_STEPS = 10
-DEFAULT_ACTION_CHUNK = 50
-
-
 class Pi0OnnxServer:
-    """Compose the 5 pi0 ONNX stages for end-to-end inference."""
+    """Monolithic pi0 ONNX runtime.
 
-    def __init__(self, export_dir: str | Path, providers: list[str] | None = None):
+    Loads the single-file ONNX from `export_dir/model.onnx` (or explicit
+    onnx_path). Runs one inference per /act request — the ONNX internally
+    computes prefix embeddings + runs the flow-matching Euler loop for
+    `num_steps` as baked-in at export time.
+    """
+
+    def __init__(
+        self,
+        export_dir: str | Path,
+        onnx_path: str | Path | None = None,
+        providers: list[str] | None = None,
+        strict_providers: bool = True,
+    ):
         self.export_dir = Path(export_dir)
+        self._explicit_onnx_path = Path(onnx_path) if onnx_path else None
         self.providers = providers or ["CPUExecutionProvider"]
-        self._sessions: dict[str, Any] = {}
+        self._session: Any = None
         self.config: dict[str, Any] = {}
         self._ready = False
+        self._inference_mode = "pi0_onnx_monolithic"
+
+    def _find_onnx_path(self) -> Path:
+        if self._explicit_onnx_path is not None:
+            return self._explicit_onnx_path
+        # Default layouts we accept
+        candidates = [
+            self.export_dir / "model.onnx",
+            self.export_dir / "monolithic" / "model.onnx",
+            self.export_dir / "pi0_monolithic.onnx",
+        ]
+        for p in candidates:
+            if p.exists():
+                return p
+        raise FileNotFoundError(
+            f"No pi0 monolithic ONNX found in {self.export_dir}. Tried: {candidates}"
+        )
 
     def load(self) -> None:
-        """Load reflex_config.json + 5 ORT sessions."""
         import onnxruntime as ort
 
+        onnx_path = self._find_onnx_path()
+        logger.info("Loading pi0 monolithic ONNX: %s", onnx_path)
+        start = time.perf_counter()
+        self._session = ort.InferenceSession(str(onnx_path), providers=self.providers)
+        elapsed = time.perf_counter() - start
+
+        # Load config if present (optional — may not exist for ad-hoc ONNX)
         cfg_path = self.export_dir / "reflex_config.json"
-        if not cfg_path.exists():
-            raise FileNotFoundError(f"Missing {cfg_path}")
-        self.config = json.loads(cfg_path.read_text())
+        if cfg_path.exists():
+            self.config = json.loads(cfg_path.read_text())
 
-        def _load(key: str, filename: str | None = None) -> Any:
-            rel = self.config["components"].get(key) or filename
-            if rel is None:
-                raise KeyError(f"Component {key} not in reflex_config.json")
-            path = Path(rel)
-            if not path.is_absolute():
-                path = self.export_dir / rel
-            logger.info("Loading ONNX session: %s -> %s", key, path)
-            return ort.InferenceSession(str(path), providers=self.providers)
-
-        self._sessions["vision_encoder"] = _load("vision_encoder")
-        self._sessions["multi_modal_projector"] = _load("multi_modal_projector")
-        self._sessions["text_embedder"] = _load("text_embedder")
-        self._sessions["decoder_prefill"] = _load("decoder_prefill")
-        self._sessions["expert_stack"] = _load("expert_stack")
-
-        # Cache expert metadata (dims) for flow-matching loop
-        expert_meta = self.config.get("metadata", {}).get("expert", {})
-        self.n_expert_layers = int(expert_meta.get("num_layers", 18))
-        self.expert_nkv = int(expert_meta.get("n_kv_heads", 1))
-        self.expert_head_dim = int(expert_meta.get("head_dim", 256))
-        self.action_dim = int(expert_meta.get("action_dim", 32))
-        # Text embedder / projector dims
-        te_meta = self.config.get("metadata", {}).get("text_embedder", {})
-        self.vocab_size = int(te_meta.get("vocab_size", 257152))
-        self.text_hidden = int(te_meta.get("hidden_size", 2048))
-        proj_meta = self.config.get("metadata", {}).get("projector", {})
-        self.vision_in = int(proj_meta.get("in_dim", 1152))
-        self.vision_out = int(proj_meta.get("out_dim", 2048))
-
-        self._ready = True
+        # Extract expected inputs from the ONNX graph for validation
+        self._input_names = [i.name for i in self._session.get_inputs()]
         logger.info(
-            "Pi0OnnxServer ready: %d expert layers, nkv=%d, head_dim=%d, action_dim=%d",
-            self.n_expert_layers, self.expert_nkv, self.expert_head_dim, self.action_dim,
+            "Pi0OnnxServer ready in %.2fs (inputs: %s)",
+            elapsed, self._input_names,
         )
+        self._ready = True
 
     @property
     def ready(self) -> bool:
         return self._ready
 
-    def _run_vision(self, pixel_values: np.ndarray) -> np.ndarray:
-        """Stage 1: pixel_values [B, 3, 224, 224] -> vision features [B, 256, 1152]."""
-        out = self._sessions["vision_encoder"].run(None, {"pixel_values": pixel_values})[0]
-        return out
-
-    def _run_projector(self, vision: np.ndarray) -> np.ndarray:
-        """Stage 2: [B, 256, 1152] -> [B, 256, 2048]."""
-        out = self._sessions["multi_modal_projector"].run(None, {"vision_features": vision})[0]
-        return out
-
-    def _run_text(self, input_ids: np.ndarray) -> np.ndarray:
-        """Stage 3: [B, seq] int64 -> [B, seq, 2048]."""
-        out = self._sessions["text_embedder"].run(None, {"input_ids": input_ids})[0]
-        return out
-
-    def _run_decoder_prefill(
-        self,
-        inputs_embeds: np.ndarray,
-        attention_mask: np.ndarray | None = None,
-    ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-        """Stage 4: [B, prefix_len, 2048] -> last_hidden + per-layer prefix_k/v.
-
-        Uses our GemmaFromEmbeds ONNX (takes inputs_embeds directly).
-        Returns:
-          last_hidden_state: [B, prefix_len, 2048]
-          prefix_k: [num_layers, B, prefix_len, nkv, head_dim]
-          prefix_v: same shape
-        """
-        if attention_mask is None:
-            B, seq = inputs_embeds.shape[:2]
-            attention_mask = np.ones((B, seq), dtype=np.int64)
-        ort_outs = self._sessions["decoder_prefill"].run(None, {
-            "inputs_embeds": inputs_embeds.astype(np.float32),
-            "attention_mask": attention_mask.astype(np.int64),
-        })
-        last_hidden = ort_outs[0]
-        # Remaining outputs alternate present.{i}.key, present.{i}.value
-        # Each of shape [B, nkv, seq, head_dim]
-        num_layers = self.n_expert_layers
-        k_list, v_list = [], []
-        for i in range(num_layers):
-            k_list.append(ort_outs[1 + 2 * i])
-            v_list.append(ort_outs[2 + 2 * i])
-        # Stack -> [L, B, nkv, seq, head_dim]
-        prefix_k = np.stack(k_list, axis=0)
-        prefix_v = np.stack(v_list, axis=0)
-        # Expert expects prefix_k shape [L, B, prefix_len, nkv, head_dim]
-        # Gemma KV comes as [B, nkv, seq, hd]; transpose to [B, seq, nkv, hd]
-        prefix_k = np.transpose(prefix_k, (0, 1, 3, 2, 4))
-        prefix_v = np.transpose(prefix_v, (0, 1, 3, 2, 4))
-        return last_hidden, prefix_k, prefix_v
-
-    def _run_expert(
-        self,
-        noisy_actions: np.ndarray,
-        timestep: np.ndarray,
-        position_ids: np.ndarray,
-        prefix_k: np.ndarray,
-        prefix_v: np.ndarray,
-    ) -> np.ndarray:
-        """Stage 5 (per-step): denoise with prefix-KV concat attention."""
-        out = self._sessions["expert_stack"].run(None, {
-            "noisy_actions": noisy_actions.astype(np.float32),
-            "timestep": timestep.astype(np.float32),
-            "position_ids": position_ids.astype(np.int64),
-            "prefix_k": prefix_k.astype(np.float32),
-            "prefix_v": prefix_v.astype(np.float32),
-        })[0]
-        return out
-
     def predict(
         self,
-        *,
-        pixel_values: np.ndarray,
-        input_ids: np.ndarray,
-        state: np.ndarray | None = None,
+        image: np.ndarray | list[np.ndarray] | None = None,
+        instruction: str = "",
+        state: list[float] | np.ndarray | None = None,
         noise: np.ndarray | None = None,
-        num_steps: int = DEFAULT_NUM_DENOISE_STEPS,
-        chunk_size: int = DEFAULT_ACTION_CHUNK,
+        lang_tokens: np.ndarray | None = None,
+        lang_masks: np.ndarray | None = None,
     ) -> dict[str, Any]:
-        """Run full pi0 forward pass.
+        """Run one pi0 forward pass.
 
         Inputs:
-            pixel_values: [B, 3, 224, 224] float32
-            input_ids:    [B, text_len] int64 (PaliGemma tokenization)
-            state:        [B, state_dim] float32 (optional; random if None)
-            noise:        [B, chunk_size, action_dim] float32 (optional seeded)
-            num_steps:    flow-matching Euler steps (default 10)
-            chunk_size:   action chunk length (default 50)
+          image: single image array [H, W, 3] uint8, or list of 3 (base + wrist_l + wrist_r)
+          instruction: task text (used to produce lang_tokens if not provided)
+          state: robot state [max_state_dim]
+          noise: fixed noise [1, chunk, action_dim] for deterministic output
+          lang_tokens: optional pre-tokenized input (skips internal tokenization)
+          lang_masks: optional
 
-        Returns dict with 'actions' (denoised chunk) + telemetry.
+        Returns dict with 'actions' + metadata.
         """
         if not self._ready:
-            raise RuntimeError("Call .load() first")
+            return {"error": "Model not loaded. Call load() first."}
 
-        B = pixel_values.shape[0]
+        t0 = time.perf_counter()
 
-        # Stage 1-2: vision + project
-        vision_feats = self._run_vision(pixel_values.astype(np.float32))
-        projected_vision = self._run_projector(vision_feats)  # [B, 256, 2048]
+        # Image prep: accept single image or list of 3; replicate if needed
+        images_list = (
+            image if isinstance(image, list)
+            else [image] if image is not None
+            else []
+        )
+        while len(images_list) < 3:
+            images_list.append(
+                images_list[-1] if images_list else np.zeros((224, 224, 3), np.uint8)
+            )
+        images_list = images_list[:3]
 
-        # Stage 3: text embed
-        text_feats = self._run_text(input_ids.astype(np.int64))  # [B, text_len, 2048]
+        def _prep_img(img: np.ndarray) -> np.ndarray:
+            arr = np.asarray(img, dtype=np.float32)
+            if arr.max() > 1.5:  # uint8-ish range → scale to [-1, 1]
+                arr = arr / 255.0
+                arr = arr * 2.0 - 1.0
+            if arr.ndim == 3:
+                arr = arr.transpose(2, 0, 1)[None, :]  # [1, 3, H, W]
+            return arr.astype(np.float32)
 
-        # Stage 4: decoder prefill -> real per-layer KV via GemmaFromEmbeds
-        # Scale vision features by sqrt(hidden) — matches pi0's embed_image
-        # which does `features * hidden_size**0.5`. Applied to projected_vision
-        # so it lives on the same scale as text embeddings before concat.
-        scale = float(self.vision_out) ** 0.5
-        vision_scaled = projected_vision * scale
-        prefix_embeds = np.concatenate([vision_scaled, text_feats], axis=1)  # [B, 256+text_len, 2048]
-        prefix_mask = np.ones(prefix_embeds.shape[:2], dtype=np.int64)
-        _, prefix_k, prefix_v = self._run_decoder_prefill(prefix_embeds, prefix_mask)
+        img_base = _prep_img(images_list[0])
+        img_wrist_l = _prep_img(images_list[1])
+        img_wrist_r = _prep_img(images_list[2])
 
-        # Stage 5: flow matching Euler loop
+        mask = np.ones((1,), dtype=np.bool_)
+
+        # Lang: take externally-supplied tokens or tokenize the instruction
+        if lang_tokens is None:
+            try:
+                from transformers import AutoTokenizer
+                tok = AutoTokenizer.from_pretrained("google/paligemma-3b-pt-224")
+                enc = tok(instruction or " ", return_tensors="np", padding="max_length",
+                          max_length=16, truncation=True)
+                lang_tokens = enc["input_ids"].astype(np.int64)
+                lang_masks = enc["attention_mask"].astype(np.bool_)
+            except Exception as e:
+                logger.warning("Tokenizer unavailable (%s); using dummy tokens", e)
+                lang_tokens = np.zeros((1, 16), dtype=np.int64)
+                lang_masks = np.ones((1, 16), dtype=np.bool_)
+        if lang_masks is None:
+            lang_masks = np.ones_like(lang_tokens, dtype=np.bool_)
+
+        # State: pad to 32 if needed
+        state_dim = 32  # pi0_base max_state_dim
+        if state is None:
+            state_arr = np.zeros((1, state_dim), dtype=np.float32)
+        else:
+            state_arr = np.asarray(state, dtype=np.float32).reshape(-1)
+            if state_arr.shape[0] < state_dim:
+                state_arr = np.concatenate([state_arr, np.zeros(state_dim - state_arr.shape[0])])
+            elif state_arr.shape[0] > state_dim:
+                state_arr = state_arr[:state_dim]
+            state_arr = state_arr[None, :].astype(np.float32)
+
+        # Noise
         if noise is None:
-            noise = np.random.RandomState(0).randn(B, chunk_size, self.action_dim).astype(np.float32)
-        x_t = noise.copy()
-        dt = -1.0 / num_steps
-        # Pi0's position_ids for suffix (action) tokens start AFTER the prefix:
-        # position_ids = prefix_offsets + cumsum(suffix_pad_masks) - 1
-        # For unpadded prefix: [prefix_len, prefix_len+1, ..., prefix_len+chunk-1]
-        prefix_len = prefix_k.shape[2]  # [L, B, prefix_len, nkv, hd]
-        pos_ids = (prefix_len + np.arange(chunk_size, dtype=np.int64))[None, :].repeat(B, 0)
+            chunk = 50
+            action_dim = 32
+            noise = np.random.RandomState(0).randn(1, chunk, action_dim).astype(np.float32)
+        noise = np.asarray(noise, dtype=np.float32)
 
-        for step in range(num_steps):
-            t = 1.0 + step * dt
-            t_arr = np.full((B,), t, dtype=np.float32)
-            velocity = self._run_expert(x_t, t_arr, pos_ids, prefix_k, prefix_v)
-            x_t = x_t + dt * velocity
+        # Run the ONNX
+        ort_inputs = {
+            "img_base": img_base,
+            "img_wrist_l": img_wrist_l,
+            "img_wrist_r": img_wrist_r,
+            "mask_base": mask,
+            "mask_wrist_l": mask,
+            "mask_wrist_r": mask,
+            "lang_tokens": lang_tokens,
+            "lang_masks": lang_masks,
+            "state": state_arr,
+            "noise": noise,
+        }
+        # Drop any extra inputs the ONNX doesn't have (defensive)
+        ort_inputs = {k: v for k, v in ort_inputs.items() if k in self._input_names}
 
-        # Output
+        actions = self._session.run(None, ort_inputs)[0]  # [B, chunk, action_dim]
+
+        elapsed_ms = (time.perf_counter() - t0) * 1000
+        actions_out = actions[0]  # drop batch dim for single-request response
+
         return {
-            "actions": x_t,  # [B, chunk, action_dim]
-            "num_actions": x_t.shape[1],
-            "action_dim": x_t.shape[2],
-            "num_denoising_steps": num_steps,
-            "inference_mode": "pi0_onnx_composed",
-            "note": "prefix_kv is zero-init in v0.2 scaffold; real conditioning requires v0.3 Gemma inputs_embeds wrapper",
+            "actions": actions_out.tolist(),
+            "num_actions": int(actions_out.shape[0]),
+            "action_dim": int(actions_out.shape[1]),
+            "latency_ms": round(elapsed_ms, 1),
+            "hz": round(1000.0 / elapsed_ms, 1) if elapsed_ms > 0 else 0,
+            "inference_mode": self._inference_mode,
+            "num_denoising_steps": 1,  # baked at export time
         }

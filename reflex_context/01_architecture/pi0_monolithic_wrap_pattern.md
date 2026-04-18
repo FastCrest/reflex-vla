@@ -90,6 +90,25 @@ Keep both. Use monolithic for **deployment** (production MVP), use 5-file for **
 
 Single graph with ~10× unrolled denoise steps. Attention concat ops for past_kv extension baked in as `Concat` nodes. ~14GB total with external data (Gemma-2b backbone weights are the bulk).
 
+## Current ship status (2026-04-18)
+
+**num_steps=1 monolithic ONNX: VERIFIED at cos=+1.0000000 vs PyTorch.** Reproducer: `scripts/modal_pi0_monolithic_export.py --parity`. Artifact: `/onnx_out/monolithic/model.onnx` in Modal Volume `pi0-onnx-outputs` (~12.5GB).
+
+**num_steps=10 monolithic: BLOCKED** on `RuntimeError: expand: attempting to expand a dimension of length 835 -> 886!` raised by onnx-diagnostic's `patched__maybe_broadcast` during torch.export shape tracing. 835 is prefix_len + state=1; 886 is prefix_len + state + chunk. Some expand op inside the unrolled 10-step loop can't reconcile the pre-suffix vs post-suffix shape. Unresolved as of this write.
+
+**Runtime mechanics (IMPORTANT — correcting an earlier mistake):** The num_steps=1 monolithic ONNX is NOT a "single denoise step you can host-loop." It's a full `sample_actions(num_steps=1)` call — computes prefix + runs 1 big Euler step with dt=-1.0 + returns x_final. Calling it N times from Python gives N identical outputs (deterministic). To actually achieve num_steps=10 semantics, you need either:
+
+1. **Re-export at num_steps=10 directly** (blocked on the 835→886 bug above).
+2. **Per-step ONNX** (denoise_step as standalone, takes x_t + timestep + past_kv as inputs). Past_kv-as-ONNX-input fails torch.export's DynamicCache tracer (see `03_research/pi0_onnx_importable_sources.md` critical risks #7-9).
+3. **Multiple monolithic exports at varying num_steps** (each ~7 min on Modal, each bakes a fixed num_steps). Viable for a small N set (1, 5, 10, 20).
+
+**Current customer-facing ship: num_steps=1.** Lower quality than pi0's default but numerically verified. For v0.3 we'll land at least one of the three upgrade paths above.
+
+## Follow-up goals (tracked)
+
+- **pi0-onnx-parity-multistep** — land num_steps=10 (or dynamic N) parity. Either fix the 835→886 expand bug OR export per-step + solve DynamicCache tracer issue OR bake multiple fixed-N artifacts.
+- **Distribution** — publish the 12.5GB ONNX to HF Hub once customers exist (not before — versioned artifact with a customer is better than one without).
+
 ## Related
 
 - `reflex_context/03_research/pi0_onnx_importable_sources.md` — Tier-1 source analysis (Thor, Tacoin, GR00T)
