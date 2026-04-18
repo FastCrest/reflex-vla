@@ -1,0 +1,24 @@
+{
+  "date": "2026-04-18",
+  "image": "ghcr.io/rylinjames/reflex-vla:0.2.0",
+  "also_tagged": "ghcr.io/rylinjames/reflex-vla:latest",
+  "passed": true,
+  "checks": {
+    "ci_build": {
+      "passed": true,
+      "workflow": "docker-publish.yml",
+      "run_id": "24610383432",
+      "duration_s": 510,
+      "conclusion": "success"
+    },
+    "public_pull": {
+      "passed": true,
+      "note": "Modal from_registry('ghcr.io/rylinjames/reflex-vla:0.2.0') succeeded on fresh infrastructure, proving the image is publicly accessible without auth."
+    },
+    "package_installable": {
+      "passed": true,
+      "note": "fresh-install-verified gate (modal_fresh_install_test.py) validates the identical pip package that the Dockerfile installs (`.[serve,gpu]` from the same commit). All reflex runtime + exporter modules import cleanly."
+    }
+  },
+  "notes": "Full in-container smoke via `docker run <image> reflex --help` is blocked by Modal's from_registry behavior — the Dockerfile's ENTRYPOINT ['reflex'] intercepts Modal's Python-runner exec, making that test harness unusable for this specific image shape. For real customers (`docker run ghcr.io/rylinjames/reflex-vla:0.2.0` → runs `reflex serve /exports ...`) the ENTRYPOINT is the correct and expected behavior. A GitHub Actions docker-run smoke test is tracked as a v0.3 follow-up."
+}
