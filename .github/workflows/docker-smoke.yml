@@ -1,0 +1,84 @@
+name: Docker image smoke test
+
+# Fires after docker-publish.yml completes on a release tag push. Pulls
+# the just-built image from GHCR and verifies the entry point + basic
+# subcommands work end-to-end. Catches Dockerfile regressions that
+# import-only tests miss (ENTRYPOINT wiring, wheel resolution, etc.).
+on:
+  workflow_run:
+    workflows: ["Build and publish Docker image"]
+    types: [completed]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Image tag to smoke-test (e.g. 0.2.0 or latest)"
+        required: true
+        default: "latest"
+
+jobs:
+  smoke:
+    # Only fire if the upstream workflow succeeded (no point smoking
+    # an image that never published).
+    if: ${{ github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: read
+
+    steps:
+      - name: Resolve image tag
+        id: tag
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "tag=${{ inputs.tag }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "tag=latest" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Pull image
+        run: docker pull ghcr.io/${{ github.repository }}:${{ steps.tag.outputs.tag }}
+
+      - name: reflex --help (via ENTRYPOINT)
+        run: |
+          # The Dockerfile has ENTRYPOINT=["reflex"]. `docker run <image> --help`
+          # invokes `reflex --help`, which is Typer's root-help path and
+          # should exit 0 with the usage printed.
+          docker run --rm ghcr.io/${{ github.repository }}:${{ steps.tag.outputs.tag }} --help
+          echo "exit=$?"
+
+      - name: reflex targets (via ENTRYPOINT)
+        run: |
+          docker run --rm ghcr.io/${{ github.repository }}:${{ steps.tag.outputs.tag }} targets
+
+      - name: Runtime module imports (overriding ENTRYPOINT)
+        run: |
+          # Override the ENTRYPOINT with python to run a one-line import check.
+          # Confirms the full production stack (runtime, safety, exporter) is
+          # importable from a clean container — same evidence the fresh-install
+          # gate gives but against the published image.
+          docker run --rm --entrypoint python \
+            ghcr.io/${{ github.repository }}:${{ steps.tag.outputs.tag }} \
+            -c "from reflex.runtime.server import create_app; \
+                from reflex.runtime.pi0_onnx_server import Pi0OnnxServer; \
+                from reflex.runtime.smolvla_onnx_server import SmolVLAOnnxServer; \
+                from reflex.runtime.ros2_bridge import create_ros2_bridge_node; \
+                from reflex.verification_report import write_verification_report; \
+                from reflex.safety.guard import ActionGuard; \
+                from reflex.exporters.monolithic import export_monolithic; \
+                print('all production modules imported OK')"
+
+      - name: Summarize
+        if: success()
+        run: |
+          echo "### Docker smoke PASS" >> "$GITHUB_STEP_SUMMARY"
+          echo "Image: \`ghcr.io/${{ github.repository }}:${{ steps.tag.outputs.tag }}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- \`reflex --help\` exit 0" >> "$GITHUB_STEP_SUMMARY"
+          echo "- \`reflex targets\` exit 0" >> "$GITHUB_STEP_SUMMARY"
+          echo "- all production modules importable" >> "$GITHUB_STEP_SUMMARY"

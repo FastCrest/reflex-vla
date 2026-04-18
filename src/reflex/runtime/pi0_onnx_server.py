@@ -212,3 +212,33 @@ class Pi0OnnxServer:
             "inference_mode": self._inference_mode,
             "num_denoising_steps": int(self.config.get("num_denoising_steps", 1)),
         }
+
+    # --- create_app lifespan compat ---------------------------------------
+    # ReflexServer has these methods; we mirror them so create_app's lifespan
+    # can treat monolithic servers as drop-in replacements.
+
+    async def predict_from_base64_async(
+        self,
+        image_b64: str | None = None,
+        instruction: str = "",
+        state: list[float] | None = None,
+    ) -> dict[str, Any]:
+        import base64
+        import io
+        image = None
+        if image_b64:
+            try:
+                from PIL import Image
+                img_bytes = base64.b64decode(image_b64)
+                img = Image.open(io.BytesIO(img_bytes)).convert("RGB")
+                image = np.array(img)
+            except Exception as e:
+                return {"error": f"Failed to decode image: {e}"}
+        return self.predict(image=image, instruction=instruction, state=state)
+
+    async def start_batch_worker(self) -> None:
+        # Monolithic runtime is single-request; batching is ReflexServer's job.
+        return None
+
+    async def stop_batch_worker(self) -> None:
+        return None
