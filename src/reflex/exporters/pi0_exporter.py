@@ -141,9 +141,16 @@ def build_pi0_expert_stack(
             kv_in=kv_in if is_cross else None,
             rope_theta=10000.0,
         )
+        # Pi0 uses Gemma-style RMSNorm: y = x_normed * (1 + weight), weights
+        # trained centered at 0. ExpertGQALayer uses Llama-style DecomposedRMSNorm:
+        # y = x_normed * weight. To apply pi0's Gemma weights inside a Llama RMSNorm,
+        # pre-transform: w_llama = 1 + w_gemma. Verified pattern from
+        # reflex_context/01_architecture/pi0_rmsnorm_already_decomposed.md
+        norm_in = state_dict[f"{prefix}.input_layernorm.weight"] + 1.0
+        norm_post = state_dict[f"{prefix}.post_attention_layernorm.weight"] + 1.0
         layer_sd = {
-            "input_layernorm.weight": state_dict[f"{prefix}.input_layernorm.weight"],
-            "post_attention_layernorm.weight": state_dict[f"{prefix}.post_attention_layernorm.weight"],
+            "input_layernorm.weight": norm_in,
+            "post_attention_layernorm.weight": norm_post,
             "q_proj.weight": state_dict[f"{prefix}.self_attn.q_proj.weight"],
             "k_proj.weight": state_dict[f"{prefix}.self_attn.k_proj.weight"],
             "v_proj.weight": state_dict[f"{prefix}.self_attn.v_proj.weight"],
@@ -155,9 +162,10 @@ def build_pi0_expert_stack(
         layer.load_state_dict(layer_sd, strict=False)
         layers.append(layer)
 
-    # 6. Final RMSNorm
+    # 6. Final RMSNorm — same Gemma-style (1+weight) transform
     final_norm_key = f"{base_prefix}norm.weight"
-    final_norm_w = state_dict.get(final_norm_key, torch.ones(expert_hidden))
+    final_norm_w = state_dict.get(final_norm_key, torch.zeros(expert_hidden))
+    final_norm_w = final_norm_w + 1.0  # Gemma -> Llama convention
 
     # 7. Assemble stack
     stack = ExpertStack(
