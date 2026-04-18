@@ -8,14 +8,31 @@ the research-identified path for Gemma-family DynamicCache ONNX export.
 Iteration: ~1-2 min/run after first (pi0_base cached in Volume).
 
 Usage:
+    # One-time setup: register your HF token as a Modal secret
+    modal secret create hf-token HF_TOKEN=hf_xxxxx
+    # Or export locally: `export HF_TOKEN=hf_xxxxx` (picked up as fallback)
+
     modal run scripts/modal_pi0_monolithic_export.py
 
 Output: /tmp/pi0_monolithic_onnx/model.onnx in the Modal container. Fetch
 via modal.Volume or print verdict + cos number for parity test.
 """
+import os
 import modal
 
 app = modal.App("pi0-monolithic-export")
+
+
+def _hf_secret():
+    """Return a Modal Secret carrying HF_TOKEN.
+
+    Order: local `HF_TOKEN` env var (dev convenience) → Modal named secret
+    `hf-token` (production). Never hardcode the token in source.
+    """
+    token = os.environ.get("HF_TOKEN", "")
+    if token:
+        return modal.Secret.from_dict({"HF_TOKEN": token})
+    return modal.Secret.from_name("hf-token")
 
 # Persistent volume for HF cache (pi0_base is ~14GB)
 hf_cache = modal.Volume.from_name("pi0-hf-cache", create_if_missing=True)
@@ -60,11 +77,7 @@ image = (
         HF_CACHE_PATH: hf_cache,
         ONNX_OUTPUT_PATH: onnx_output,
     },
-    secrets=[
-        modal.Secret.from_dict({
-            "HF_TOKEN": "REMOVED_HF_TOKEN",
-        }),
-    ],
+    secrets=[_hf_secret()],
 )
 def export_pi0_monolithic_modal(
     model_id: str = "lerobot/pi0_base",
@@ -275,11 +288,7 @@ def export_pi0_monolithic_modal(
         HF_CACHE_PATH: hf_cache,
         ONNX_OUTPUT_PATH: onnx_output,
     },
-    secrets=[
-        modal.Secret.from_dict({
-            "HF_TOKEN": "REMOVED_HF_TOKEN",
-        }),
-    ],
+    secrets=[_hf_secret()],
 )
 def parity_test_monolithic(model_id: str = "lerobot/pi0_base"):
     """Parity test: PyTorch pi0 vs monolithic ONNX at num_steps=1.
@@ -409,7 +418,7 @@ def parity_test_monolithic(model_id: str = "lerobot/pi0_base"):
     timeout=1800,
     volumes={HF_CACHE_PATH: hf_cache},
     secrets=[
-        modal.Secret.from_dict({"HF_TOKEN": "REMOVED_HF_TOKEN"}),
+        _hf_secret(),
     ],
 )
 def parity_native_pi0(model_id: str = "lerobot/pi0_base"):

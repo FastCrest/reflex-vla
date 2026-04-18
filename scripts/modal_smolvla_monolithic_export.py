@@ -18,9 +18,18 @@ Usage:
 
 Output: /onnx_out/smolvla_monolithic/model.onnx on Modal Volume.
 """
+import os
 import modal
 
 app = modal.App("smolvla-monolithic-export")
+
+
+def _hf_secret():
+    """HF_TOKEN via local env var (dev) or Modal named secret `hf-token` (prod)."""
+    token = os.environ.get("HF_TOKEN", "")
+    if token:
+        return modal.Secret.from_dict({"HF_TOKEN": token})
+    return modal.Secret.from_name("hf-token")
 
 # Reuse pi0's HF cache volume — same HF models may be pulled; saves storage
 hf_cache = modal.Volume.from_name("pi0-hf-cache", create_if_missing=True)
@@ -176,7 +185,7 @@ def _apply_patches():
     gpu="A10G",
     timeout=3600,
     volumes={HF_CACHE_PATH: hf_cache, ONNX_OUTPUT_PATH: onnx_output},
-    secrets=[modal.Secret.from_dict({"HF_TOKEN": "REMOVED_HF_TOKEN"})],
+    secrets=[_hf_secret()],
 )
 def export_smolvla_monolithic_modal(num_steps: int = 1):
     """Export SmolVLA as monolithic ONNX via onnx-diagnostic path."""
@@ -400,7 +409,7 @@ def export_smolvla_monolithic_modal(num_steps: int = 1):
     gpu="A10G",
     timeout=1800,
     volumes={HF_CACHE_PATH: hf_cache, ONNX_OUTPUT_PATH: onnx_output},
-    secrets=[modal.Secret.from_dict({"HF_TOKEN": "REMOVED_HF_TOKEN"})],
+    secrets=[_hf_secret()],
 )
 def parity_test_smolvla(num_steps: int = 1):
     """Parity: PyTorch SmolVLA sample_actions(num_steps=N) vs monolithic ONNX(N)."""
