@@ -574,16 +574,19 @@ def export_pi0_prefix(
         "hidden_size": emb.embed.embedding_dim,
     }
 
-    # 4. Gemma backbone decoder (with prefix-KV output)
+    # 4. Gemma backbone decoder WITH inputs_embeds API (pi0 fuses vision+text
+    #    BEFORE the decoder; Optimum's Gemma export takes input_ids which
+    #    doesn't fit. Use our GemmaFromEmbeds wrapper instead.)
     gemma_pt_dir = output_dir / "_pt" / "gemma"
     if not skip_gemma or not gemma_pt_dir.exists():
         logger.info("Building Gemma backbone dir...")
         build_gemma_dir(state_dict, gemma_pt_dir)
     gemma_onnx_dir = output_dir / "decoder_prefill"
-    if not (gemma_onnx_dir / "model.onnx").exists():
-        logger.info("Exporting Gemma backbone via Optimum (text-generation-with-past)...")
-        optimum_export_onnx(gemma_pt_dir, "text-generation-with-past", gemma_onnx_dir)
-    result["files"]["decoder_prefill"] = str(gemma_onnx_dir / "model.onnx")
+    gemma_onnx_path = gemma_onnx_dir / "model.onnx"
+    if not gemma_onnx_path.exists():
+        logger.info("Exporting Gemma backbone via GemmaFromEmbeds wrapper...")
+        build_and_export_gemma_from_embeds(gemma_pt_dir, gemma_onnx_path)
+    result["files"]["decoder_prefill"] = str(gemma_onnx_path)
 
     # 5. Expert stack WITH prefix-KV concat (block-causal attention)
     #

@@ -217,12 +217,26 @@ def build_adapter_class():
 
             # strict_providers=False: sim doesn't need GPU; silently falling
             # back to CPU is fine here (unlike production benchmarking).
-            self._server = ReflexServer(
-                export_dir,
-                device=device,
-                num_denoising_steps=num_denoising_steps,
-                strict_providers=False,
-            )
+            # Route to native PyTorch path when REFLEX_NATIVE=1. The native
+            # server handles preprocess + postprocess internally so the adapter
+            # doesn't need to apply its own normalizer.
+            if os.environ.get("REFLEX_NATIVE", "0") == "1":
+                from reflex.runtime.smolvla_native import SmolVLANativeServer
+                self._server = SmolVLANativeServer(
+                    export_dir,
+                    device=device,
+                    strict_providers=False,
+                    num_denoising_steps=num_denoising_steps,
+                )
+                self._native_mode = True
+            else:
+                self._server = ReflexServer(
+                    export_dir,
+                    device=device,
+                    num_denoising_steps=num_denoising_steps,
+                    strict_providers=False,
+                )
+                self._native_mode = False
             self._server.load()
 
             # Load LeRobot MEAN_STD stats for state-in / action-out normalization.
@@ -317,8 +331,11 @@ def build_adapter_class():
 
             # Normalize state: state_norm = (state - mean) / (std + eps).
             # Model was trained on normalized state; raw input produces garbage.
+            # Skip when using native path — the server's preprocessor handles
+            # normalization internally.
             if (
-                state is not None
+                not getattr(self, "_native_mode", False)
+                and state is not None
                 and "state_mean" in self._norm_stats
                 and "state_std" in self._norm_stats
             ):
@@ -346,10 +363,11 @@ def build_adapter_class():
             actions = truncate_actions(actions, self._action_dim_out)  # [chunk, 7]
 
             # Unnormalize actions: action_real = action_norm * std + mean.
-            # Model outputs live in the normalized action space; LIBERO wants
-            # real joint velocities. Critical for non-zero task success.
+            # Skip when using native path — server's postprocessor already
+            # unnormalized via the real lerobot pipeline.
             if (
-                "action_mean" in self._norm_stats
+                not getattr(self, "_native_mode", False)
+                and "action_mean" in self._norm_stats
                 and "action_std" in self._norm_stats
             ):
                 a_mean = self._norm_stats["action_mean"]

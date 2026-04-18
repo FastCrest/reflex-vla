@@ -423,15 +423,18 @@ class ReflexServer:
             if expert_has_split_kv and vlm_k is not None and vlm_v is not None:
                 feed_dict["vlm_k"] = vlm_k
                 feed_dict["vlm_v"] = vlm_v
-                # prefix_offset: self-attn expert layers offset their q RoPE by
-                # the prefix length (real denoise_step semantics). Feed the
-                # VLM prefix sequence length from vlm_k[0].shape[1] (the seq
-                # axis of per-layer k).
+                prefix_len = int(vlm_k.shape[2])  # [L, B, seq, kv]
+                batch = noisy_actions.shape[0]
                 if "prefix_offset" in self._expert_input_names:
-                    prefix_len = int(vlm_k.shape[2])  # [L, B, seq, kv]
-                    batch = noisy_actions.shape[0]
                     feed_dict["prefix_offset"] = np.full(
                         (batch, 1), prefix_len, dtype=np.int64
+                    )
+                if "kv_mask" in self._expert_input_names:
+                    # All-valid mask when we don't have the prefix pad mask handy.
+                    # TODO: plumb the real padded-token mask through from the
+                    # VLM orchestrator.
+                    feed_dict["kv_mask"] = np.ones(
+                        (batch, prefix_len), dtype=bool
                     )
             elif expert_has_single_kv and vlm_kv_single is not None:
                 feed_dict["vlm_kv"] = vlm_kv_single
@@ -845,18 +848,38 @@ def create_app(
     except ImportError:
         raise ImportError("Install fastapi: pip install 'reflex-vla[serve]'")
 
-    server = ReflexServer(
-        export_dir,
-        device=device,
-        providers=providers,
-        strict_providers=strict_providers,
-        safety_config=safety_config,
-        adaptive_steps=adaptive_steps,
-        cloud_fallback_url=cloud_fallback_url,
-        deadline_ms=deadline_ms,
-        max_batch=max_batch,
-        batch_timeout_ms=batch_timeout_ms,
-    )
+    # Route: decomposed-ONNX by default; native PyTorch path under REFLEX_NATIVE=1.
+    # The native path bypasses our ONNX export and runs lerobot's SmolVLAPolicy
+    # directly (RMSNorm still swapped for DecomposedRMSNorm for TRT-export compat
+    # on the decomposed side). See reflex/runtime/smolvla_native.py.
+    import os as _os
+    if _os.environ.get("REFLEX_NATIVE", "0") == "1":
+        from reflex.runtime.smolvla_native import SmolVLANativeServer
+        server = SmolVLANativeServer(
+            export_dir,
+            device=device,
+            providers=providers,
+            strict_providers=strict_providers,
+            safety_config=safety_config,
+            adaptive_steps=adaptive_steps,
+            cloud_fallback_url=cloud_fallback_url,
+            deadline_ms=deadline_ms,
+            max_batch=max_batch,
+            batch_timeout_ms=batch_timeout_ms,
+        )
+    else:
+        server = ReflexServer(
+            export_dir,
+            device=device,
+            providers=providers,
+            strict_providers=strict_providers,
+            safety_config=safety_config,
+            adaptive_steps=adaptive_steps,
+            cloud_fallback_url=cloud_fallback_url,
+            deadline_ms=deadline_ms,
+            max_batch=max_batch,
+            batch_timeout_ms=batch_timeout_ms,
+        )
 
     @asynccontextmanager
     async def lifespan(app):

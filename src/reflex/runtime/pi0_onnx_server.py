@@ -114,33 +114,38 @@ class Pi0OnnxServer:
         self,
         inputs_embeds: np.ndarray,
         attention_mask: np.ndarray | None = None,
-    ) -> tuple[np.ndarray, list[np.ndarray], list[np.ndarray]]:
-        """Stage 4: [B, prefix_len, 2048] -> logits + per-layer K/V cache.
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """Stage 4: [B, prefix_len, 2048] -> last_hidden + per-layer prefix_k/v.
 
-        Feeds empty past_key_values (prefill pass), captures the returned
-        present.N.key/value outputs as the prefix KV for the expert.
-
-        NOTE: Optimum's Gemma export takes input_ids (not inputs_embeds). To
-        feed arbitrary embeddings (vision + text concat), we'd need a different
-        export. Workaround: pre-pend tokens corresponding to the vision+text
-        embeddings and run via input_ids. For v0.3 we'll address this gap;
-        for now this method is a scaffold that accepts inputs_embeds but will
-        raise until we wire in an inputs_embeds-taking decoder export.
+        Uses our GemmaFromEmbeds ONNX (takes inputs_embeds directly).
+        Returns:
+          last_hidden_state: [B, prefix_len, 2048]
+          prefix_k: [num_layers, B, prefix_len, nkv, head_dim]
+          prefix_v: same shape
         """
-        # TODO(v0.3): Optimum's text-generation-with-past exports take input_ids,
-        # not inputs_embeds. Pi0 fuses vision+text embeddings BEFORE the decoder,
-        # so we need either:
-        #   (a) a custom Gemma wrapper whose forward accepts inputs_embeds and
-        #       runs transformer layers from there (skipping embed_tokens), or
-        #   (b) a tokenized-only path where we pretend the vision features are
-        #       "tokens" via a learned projection (closer to how PaliGemma's
-        #       image feature placeholder tokens work).
-        # Keeping this method scaffolded; parity test will flag the gap.
-        raise NotImplementedError(
-            "Stage 4 (decoder_prefill on inputs_embeds) requires a custom Gemma "
-            "ONNX wrapper. Currently Optimum exports Gemma w/ input_ids only. "
-            "See docstring for v0.3 options."
-        )
+        if attention_mask is None:
+            B, seq = inputs_embeds.shape[:2]
+            attention_mask = np.ones((B, seq), dtype=np.int64)
+        ort_outs = self._sessions["decoder_prefill"].run(None, {
+            "inputs_embeds": inputs_embeds.astype(np.float32),
+            "attention_mask": attention_mask.astype(np.int64),
+        })
+        last_hidden = ort_outs[0]
+        # Remaining outputs alternate present.{i}.key, present.{i}.value
+        # Each of shape [B, nkv, seq, head_dim]
+        num_layers = self.n_expert_layers
+        k_list, v_list = [], []
+        for i in range(num_layers):
+            k_list.append(ort_outs[1 + 2 * i])
+            v_list.append(ort_outs[2 + 2 * i])
+        # Stack -> [L, B, nkv, seq, head_dim]
+        prefix_k = np.stack(k_list, axis=0)
+        prefix_v = np.stack(v_list, axis=0)
+        # Expert expects prefix_k shape [L, B, prefix_len, nkv, head_dim]
+        # Gemma KV comes as [B, nkv, seq, hd]; transpose to [B, seq, nkv, hd]
+        prefix_k = np.transpose(prefix_k, (0, 1, 3, 2, 4))
+        prefix_v = np.transpose(prefix_v, (0, 1, 3, 2, 4))
+        return last_hidden, prefix_k, prefix_v
 
     def _run_expert(
         self,
@@ -194,18 +199,15 @@ class Pi0OnnxServer:
         # Stage 3: text embed
         text_feats = self._run_text(input_ids.astype(np.int64))  # [B, text_len, 2048]
 
-        # Stage 4: decoder prefill -> per-layer KV (NOT YET WIRED — see docstring)
-        # Scaffold path: fake prefix_kv as zeros until we have a working
-        # inputs_embeds-taking Gemma ONNX.
-        logger.warning(
-            "Using zero-init prefix_kv as scaffold (v0.3 TODO: wire real Gemma ONNX)"
-        )
-        prefix_len = projected_vision.shape[1] + text_feats.shape[1]
-        prefix_k = np.zeros(
-            (self.n_expert_layers, B, prefix_len, self.expert_nkv, self.expert_head_dim),
-            dtype=np.float32,
-        )
-        prefix_v = np.zeros_like(prefix_k)
+        # Stage 4: decoder prefill -> real per-layer KV via GemmaFromEmbeds
+        # Scale vision features by sqrt(hidden) — matches pi0's embed_image
+        # which does `features * hidden_size**0.5`. Applied to projected_vision
+        # so it lives on the same scale as text embeddings before concat.
+        scale = float(self.vision_out) ** 0.5
+        vision_scaled = projected_vision * scale
+        prefix_embeds = np.concatenate([vision_scaled, text_feats], axis=1)  # [B, 256+text_len, 2048]
+        prefix_mask = np.ones(prefix_embeds.shape[:2], dtype=np.int64)
+        _, prefix_k, prefix_v = self._run_decoder_prefill(prefix_embeds, prefix_mask)
 
         # Stage 5: flow matching Euler loop
         if noise is None:
