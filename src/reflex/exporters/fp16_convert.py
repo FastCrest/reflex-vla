@@ -128,22 +128,27 @@ def convert_fp32_to_fp16(
     dst = Path(fp16_onnx_path)
     dst.parent.mkdir(parents=True, exist_ok=True)
 
-    logger.info("[fp16] Loading %s...", src)
+    # Protobuf's 2GB-per-message limit bites both `ByteSize()` AND
+    # `SerializeToString()`. Detect oversized models by checking the
+    # on-disk size of external data BEFORE loading — if weights alone
+    # exceed ~1.8GB, skip internal shape inference (which would
+    # serialize the loaded proto).
+    on_disk_bytes = _size_with_external(src)
+    disable_shape_infer = on_disk_bytes > 1_800_000_000
+
+    logger.info("[fp16] Loading %s (%.2f GB on disk)...",
+                src, on_disk_bytes / 1e9)
     model_fp32 = onnx.load(str(src), load_external_data=True)
 
     blocklist = list(op_block_list if op_block_list is not None else FP16_OP_BLOCKLIST)
-
-    # Shape inference runs internally inside convert_float_to_float16 by
-    # default. It serializes the whole proto (including loaded external
-    # data), which hits the 2GB protobuf limit on models >2GB. Disable
-    # when the loaded proto would exceed the limit — we already trust the
-    # upstream exporter's shape inference.
-    disable_shape_infer = model_fp32.ByteSize() > 1_800_000_000
 
     logger.info(
         "[fp16] Converting (keep_io=%s, blocklist=%s, disable_shape_infer=%s)...",
         keep_io_types, blocklist, disable_shape_infer,
     )
+    # The smolvla libero monolithic is 2.2GB on disk — triggers disable_shape_infer
+    # (we don't want to hit the 2GB protobuf serialization limit during
+    # onnx.shape_inference). pi0 (12.5GB) and pi0.5 (13GB) will also use this path.
     model_fp16 = convert_float_to_float16(
         model_fp32,
         keep_io_types=keep_io_types,
