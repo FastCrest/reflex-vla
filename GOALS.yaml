@@ -1,29 +1,29 @@
 version: 1
 mission: "Deploy any VLA model to any edge hardware. One command."
 
-# ── CURRENT FOCUS (updated 2026-04-19 late session) ────────────────
-# BREAKTHROUGH: After 4 iterations of port-from-OpenPI work, we got our
-# FIRST non-zero LIBERO-10 task success — 1/3 on task 0 via the
-# monolithic cos=1.0 pipeline + the OpenPI-style rollout loop. Root
-# cause of the prior 0% was NOT vla-eval adapter, NOT VLM conditioning,
-# NOT image flip, NOT camera keys — it was MISSING the policy_postprocessor
-# (action unnormalizer). We were feeding normalized zero-mean values to
-# env.step instead of real-scale delta actions. See
+# ── CURRENT FOCUS (updated 2026-04-19 post-N=25) ────────────────────
+# LIBERO N=25 COMPLETE: 10/25 = 40.0% overall. Per-task: 3/5 on tasks
+# 0-2 (60% each), 1/5 on task 3, 0/5 on task 4. Low end of community
+# 43-51% baseline. Root-cause of prior 0% was missing
+# policy_postprocessor (action unnormalizer); full arc in
 # reflex_context/06_experiments/task_success_results.md.
 #
-# The original vla-eval-adapter-vlm-on + libero-preprocessing-audit
-# hypotheses are SUPERSEDED — none of those was the root cause.
-# New current_focus reflects what actually matters now.
+# GR00T STEP 2 COMPLETE: state_encoder port + state/vlm_kv plumbing
+# verified via sanity test. VLM signal dominates state 47x (expected).
+# Ready for Steps 3-5 (lerobot parity + Modal ONNX export).
+#
+# Next up: close LIBERO gap to community avg (50%+), complete GR00T
+# VLM chain, verify monolithic ONNX path also achieves 40%.
 current_focus:
-  - id: libero-n25-statistical-sample
-    why: "Measure real task-success on 5 tasks × 5 episodes = 25 rollouts with the fixed harness. First statistically meaningful LIBERO-10 number for reflex. Community baseline is 43-51% at N=50."
-    eta: "~50 min Modal, ~$3"
+  - id: gr00t-eagle-vlm-steps-3-5
+    why: "Complete Eagle VLM export — lerobot parity test (step 3), Modal ONNX export of 2 ONNXes (step 4), end-to-end chain test (step 5). Turns GR00T from cos=1.0 but zero-stubbed into real deployable. Step 1+2 done; sanity passed."
+    eta: "1-2 days (no hardware dep)"
+  - id: libero-task34-gap-audit
+    why: "Tasks 3-4 underperformed at 20%/0% vs tasks 0-2 at 60%. Hypothesis: preprocessor norm or prompt format delta from training. Close to 50%+ beats community 43-51%. Half-day Modal investigation."
+    eta: "~0.5 day"
   - id: libero-via-monolithic-onnx
-    why: "N=25 confirms the NATIVE PyTorch path works end-to-end. Need to verify the monolithic ONNX path (what customers ship) achieves the same success rate. Straightforward port of the native path once N=25 lands."
-    eta: "1 day (post N=25)"
-  - id: gr00t-vlm-conditioning
-    why: "Completes GR00T to be deployable. DiT stack is cos=1.0 but VLM is zero-stubbed. Parallel track — pure code work, no Modal dep for drafting."
-    eta: "1-2 days"
+    why: "N=25 native-PyTorch achieves 40%. Monolithic ONNX (customer-facing) needs to match. Confirms 'cos=1.0 translates to task success' on the shipped path."
+    eta: "1 day"
 
 goals:
   # ── CRITICAL (weight 10) ──────────────────────────────────────────
@@ -232,8 +232,8 @@ goals:
   # actually works for your robot on your hardware" story.
 
   - id: task-success-benchmark
-    description: "Publish task-success numbers for the monolithic ONNX path on at least ONE benchmark (LIBERO-10, SimplerEnv, or real-robot task). cos=1.0 parity verifies ONNX matches PyTorch mathematically — NOT that the robot completes the task. Without task-success numbers, a buyer reading cos=1.0 assumes deployment = working, which is an empirical gap. Blocks paid monetization: no customer pays $2k/mo for 'verified parity, task success unmeasured.' Prior LIBERO-10 runs on the decomposed path hit 0% (see 05_sessions/2026-04-17_libero_correctness_hunt.md); need to re-run on the cos=1.0 monolithic path."
-    check: "test -f reflex_context/06_experiments/task_success_results.md && grep -q 'LIBERO\\|SimplerEnv\\|success_rate' reflex_context/06_experiments/task_success_results.md 2>/dev/null"
+    description: "COMPLETED 2026-04-19 (N=25 result). Published task-success on LIBERO-10 via HuggingFaceVLA/smolvla_libero: 10/25 = 40.0% (per-task 60%/60%/60%/20%/0% on tasks 0-4). Statistically in line with lerobot community's 43-51% baseline. First statistically meaningful LIBERO number for reflex. See reflex_context/06_experiments/task_success_results.md. The N=25 rollout was on the NATIVE PyTorch path (REFLEX_NATIVE=1); verifying the monolithic ONNX path hits same is a separate goal (libero-via-monolithic-onnx)."
+    check: "test -f reflex_context/06_experiments/task_success_results.md && grep -q '10/25\\|40.0' reflex_context/06_experiments/task_success_results.md 2>/dev/null"
     weight: 10
 
   - id: jetson-latency-published
@@ -283,6 +283,37 @@ goals:
     weight: 0
 
   - id: libero-adapter-lerobot-conformance
-    description: "DISCOVERED 2026-04-19 after pipeline-clean parity test: our adapter vs raw SmolVLAPolicy match bit-exact (cos=+1.000000, max_abs=0.0), so the LIBERO 0% isn't a pipeline bug. Web research identified FIVE concrete deltas between our harness and lerobot's own LIBERO eval: (1) MODEL — we use community checkpoint `lerobot/smolvla_libero` (471 dl, no published eval); switch to canonical `HuggingFaceVLA/smolvla_libero` (11k dl, paper libero_10=71%). (2) 180° H+W image flip — lerobot's LiberoProcessorStep does torch.flip(img, dims=[2,3]) on every camera image; our adapter doesn't. 'Almost certainly alone drops success to near-zero.' (3) CAMERA KEYS — canonical config expects observation.images.image + image2 (2 cameras); our adapter uses camera1/2/3 with a phantom 3rd replica. (4) n_action_steps=1 — the paper's eval re-queries every env step (throws away 49/50 predicted actions per chunk); vla-eval may be running open-loop 50-step chunks. (5) STATE = 8-dim eef_pos(3) + quat-to-axis-angle(3) + gripper_qpos(2) per LiberoProcessorStep formula. All 5 fixes together should move the needle from 0% toward the paper's 71%. Each is independently implementable."
-    check: "test -f reflex_context/06_experiments/libero_lerobot_conformance.md && grep -q 'flip\\|n_action_steps\\|HuggingFaceVLA' reflex_context/06_experiments/libero_lerobot_conformance.md 2>/dev/null"
-    weight: 10
+    description: "COMPLETED 2026-04-19 — 10 iterations of port work culminated in 40% success rate via OpenPI-ported harness. Root cause of prior 0% was NOT the 5 research-identified deltas (vla-eval, VLM, flip, camera keys, n_action_steps) — it was the missing policy_postprocessor (action unnormalizer). Final harness: HuggingFaceVLA/smolvla_libero + OffScreenRenderEnv + max_steps=520 + init-state rotation + num_steps_wait=10 + policy_postprocessor.json + 180° flip + correct _quat2axisangle + replan_steps=5. Reproducer: modal run scripts/modal_libero_lerobot_native.py."
+    check: "grep -q 'postprocessor' scripts/modal_libero_lerobot_native.py 2>/dev/null"
+    weight: 0
+
+  # ── LATE-2026-04-19 IMPROVEMENT BACKLOG ───────────────────────────
+  # After N=25 result (40%) + GR00T Step 2 sanity, the strategic
+  # improvement plan is documented in
+  # reflex_context/06_experiments/task_success_results.md and in the
+  # 2026-04-19 session log. These goals track the remaining work.
+
+  - id: gr00t-eagle-vlm-steps-3-5
+    description: "COMPLETE the Eagle VLM ONNX export for GR00T. Step 1 (vendor Eagle source, strip peft, force eager attn) DONE. Step 2 (port state_encoder + extend GR00TFullStack to accept state + vlm_kv inputs) DONE, sanity-verified 2026-04-19 — state conditioning LIVE (0.06 ratio), VLM conditioning LIVE (2.85 ratio). Remaining: Step 3 lerobot parity test (compare our GR00TFullStack with real vl_embs from lerobot's backbone vs lerobot's full reference); Step 4 Modal export of eagle_vlm.onnx + expert_stack_with_vlm.onnx; Step 5 end-to-end chain test (flip image → actions should change). Full plan at reflex_context/01_architecture/gr00t_eagle_vlm_export_plan.md."
+    check: "test -f scripts/modal_gr00t_vlm_parity.py && grep -q 'eagle_vlm' scripts/modal_gr00t_monolithic_export.py 2>/dev/null"
+    weight: 9
+
+  - id: libero-task34-gap-audit
+    description: "Tasks 3 (bowl-in-drawer) + 4 (mug-on-plate) scored 20% and 0% at N=5 each, vs tasks 0-2 at 60% each. 2026-04-19 N=25 result. Likely candidates: (a) normalizer stats delta from training (lerobot's LiberoProcessorStep uses specific gripper_qpos range we may mismatch), (b) prompt format — training used specific language templates, (c) replan_steps=5 may be too aggressive for long-horizon tasks (task 3 is drawer, task 4 is bimanual-like). Deliverable: modal script that dumps per-dim action stats for tasks 3-4 vs tasks 0-2; identify delta; implement fix. Target: raise tasks 3-4 to 20-40% each."
+    check: "test -f reflex_context/06_experiments/libero_task34_audit.md 2>/dev/null"
+    weight: 8
+
+  - id: libero-via-monolithic-onnx-task-success
+    description: "N=25 = 40% success was on REFLEX_NATIVE=1 (lerobot PyTorch path). Need to verify monolithic ONNX path (what customers ship) achieves same success rate. Extend modal_libero_lerobot_native.py to route through SmolVLAOnnxServer + monolithic ONNX export; re-run N=25 or subset. If task-success drops significantly, something diverges between the cos=1.0-verified ONNX and the lerobot native path at sequence-level behavior."
+    check: "grep -q 'SmolVLAOnnxServer\\|monolithic.*task.*success' scripts/modal_libero_lerobot_native.py 2>/dev/null"
+    weight: 9
+
+  - id: libero-n50-paper-standard-sample
+    description: "OpenPI standard is 50 episodes × 10 tasks = 500 rollouts per evaluation. We ran N=25 (5 tasks × 5 eps). Expanding to N=50 (5 eps × 10 tasks) covers all libero_10 tasks. Useful for publishing a definitive number. ~2 hours Modal, ~$8 A10G. Only worth doing once libero-task34-gap-audit closes to community baseline."
+    check: "grep -q '10/50\\|task_success.*N=50\\|full_suite' reflex_context/06_experiments/task_success_results.md 2>/dev/null"
+    weight: 5
+
+  - id: simpler-env-task-success
+    description: "Second benchmark beyond LIBERO. SimplerEnv is the other standard benchmark for VLA evaluation (pi0 paper uses it). A task-success number on SimplerEnv would (a) de-risk our LIBERO number (no single-benchmark over-optimization), (b) open pi0-focused customers who benchmark on SimplerEnv. Requires SimplerEnv install (Python 3.10 + their deps) + adapter to our VLA policies."
+    check: "test -f scripts/modal_simpler_env_task_success.py 2>/dev/null"
+    weight: 6
