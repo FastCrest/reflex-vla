@@ -1,17 +1,26 @@
 version: 1
 mission: "Deploy any VLA model to any edge hardware. One command."
 
-# ── CURRENT FOCUS (2026-04-19 — active work, not backlog) ─────────
-# Between v0.2.1 tag and v0.3 launch. All four VLAs are cos=+1.000000
-# verified + customer-dogfood end-to-end verified (see
-# reflex_context/06_experiments/customer_first_run_transcript.md).
-# The two active goals are the biggest blockers to paid monetization:
+# ── CURRENT FOCUS (updated 2026-04-19 post-LIBERO run) ─────────────
+# LIBERO-10 ran end-to-end for the first time (scripts/modal_libero_monolithic.py).
+# Result: 0/10 = 0.0% task success. Root-cause hypothesis: adapter `vlm=off`
+# — fine-tune was trained with language conditioning, adapter runs blind.
+# See reflex_context/06_experiments/task_success_results.md.
+#
+# The original current_focus (task-success-benchmark + gr00t-vlm-conditioning)
+# is now split into more actionable Phase 2 sub-goals below.
 current_focus:
-  - id: task-success-benchmark
-    why: "Biggest paid-pricing unlock. cos=1.0 parity != task success; buyer needs LIBERO-10 / SimplerEnv numbers before writing a $2k/mo check. No hardware dep — runs on Modal A10G/A100."
-    eta: "1-2 days on Modal"
+  - id: vla-eval-adapter-vlm-on
+    why: "The fastest signal path to a non-zero LIBERO-10 number. Adapter currently routes images + state to the expert but feeds dummy language; fine-tune expects full VLM-conditioned tokens. Enabling this validates the hypothesis OR localizes the bug to something deeper."
+    eta: "0.5-1 day"
+  - id: libero-via-monolithic-onnx
+    why: "The real customer-path task-success test. Currently LIBERO uses REFLEX_NATIVE=1 (PyTorch path). The monolithic ONNX (what customers ship) needs to be plumbed into the adapter + re-measured. Depends on vla-eval-adapter-vlm-on passing first."
+    eta: "1-2 days (blocked on vla-eval-adapter-vlm-on)"
+  - id: libero-preprocessing-audit
+    why: "Contingency if vlm-on still yields 0%. Inspect preprocessing / camera-keying / state normalization differences between SmolVLA LIBERO fine-tune's training-time pipeline and our adapter's runtime."
+    eta: "1-3 days (only if needed)"
   - id: gr00t-vlm-conditioning
-    why: "Completes GR00T to be deployable. DiT stack is cos=1.0 but VLM is zero-stubbed; without this, customer-facing GR00T support is semantically incomplete. Pure code work, no hardware dep."
+    why: "Completes GR00T to be deployable. DiT stack is cos=1.0 but VLM is zero-stubbed. Parallel track — doesn't depend on LIBERO items."
     eta: "1-2 days"
 
 goals:
@@ -249,3 +258,24 @@ goals:
     description: "EXPLICIT SCOPE EXPANSION (2026-04-19): buyers often conflate 'deployment' with 'training' — they want an end-to-end workflow from their dataset to a deployed ONNX. Current reflex scope is deployment-only (PyTorch/JAX owns training per the product positioning). This goal adds a thin fine-tuning wrapper: `reflex finetune --base lerobot/smolvla_base --dataset <hf_id> --output ./my_export` that wraps lerobot's existing training loops + auto-exports the fine-tuned checkpoint. Lower weight than the other monetization blockers because it's a positioning question (is reflex 'the deploy tool' or 'the end-to-end tool?') — consider whether to build it before deciding to charge for it."
     check: "test -f src/reflex/finetune.py && .venv/bin/python -c 'from reflex.finetune import run_finetune' 2>/dev/null"
     weight: 5
+
+  # ── PHASE 2 LIBERO (added 2026-04-19 after first LIBERO-10 run = 0/10) ──
+  # The initial LIBERO harness runs end-to-end (infra win) but 0% task
+  # success — root cause hypothesis: adapter runs with vlm=off. These
+  # three goals are the staged fix path. See
+  # reflex_context/06_experiments/task_success_results.md.
+
+  - id: vla-eval-adapter-vlm-on
+    description: "Turn on VLM conditioning in src/reflex/runtime/adapters/vla_eval.py. Currently runs with vlm=off — adapter feeds images + state + dummy language to the expert. The SmolVLA LIBERO fine-tune was trained with full VLM-conditioned tokens; without it, the model can't resolve task intent ('alphabet soup' vs 'butter'). Confirm the fix by re-running `modal run scripts/modal_libero_monolithic.py` and expecting a non-zero task-success number. Fastest signal path to validating the hypothesis."
+    check: "test -f reflex_context/06_experiments/task_success_results.md && grep -q 'vlm=on\\|Phase 2 result\\|LIBERO-10 non-zero' reflex_context/06_experiments/task_success_results.md 2>/dev/null"
+    weight: 10
+
+  - id: libero-via-monolithic-onnx
+    description: "Extend vla_eval.py to route through SmolVLAOnnxServer (monolithic cos=+1.000000 path) when a flag is set (e.g. REFLEX_MONOLITHIC=1). Currently LIBERO uses REFLEX_NATIVE=1 (PyTorch). The monolithic ONNX is what customers actually ship, so the task-success number on the monolithic path is the load-bearing customer claim. Depends on vla-eval-adapter-vlm-on producing a non-zero baseline first — otherwise we can't distinguish adapter-plumbing bugs from monolithic-path bugs."
+    check: "grep -q 'SmolVLAOnnxServer\\|REFLEX_MONOLITHIC' src/reflex/runtime/adapters/vla_eval.py 2>/dev/null"
+    weight: 9
+
+  - id: libero-preprocessing-audit
+    description: "Contingency goal: if vla-eval-adapter-vlm-on is shipped but LIBERO-10 still yields 0% (or very low), something deeper is off. Audit: (a) state normalization (what values does LIBERO emit vs what the fine-tune was trained on?), (b) image preprocessing + camera keying (LIBERO has agentview + eye_in_hand; adapter currently picks 'first camera' — may be wrong), (c) action chunk unnormalization, (d) action chunk chunk_size vs LIBERO timestep cadence. Result: a documented per-dimension trace comparing adapter inputs/outputs vs the SmolVLA LIBERO fine-tune's published training config."
+    check: "test -f reflex_context/06_experiments/libero_preprocessing_audit.md"
+    weight: 7
