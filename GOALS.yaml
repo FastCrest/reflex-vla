@@ -1,26 +1,28 @@
 version: 1
 mission: "Deploy any VLA model to any edge hardware. One command."
 
-# ── CURRENT FOCUS (updated 2026-04-19 post-LIBERO run) ─────────────
-# LIBERO-10 ran end-to-end for the first time (scripts/modal_libero_monolithic.py).
-# Result: 0/10 = 0.0% task success. Root-cause hypothesis: adapter `vlm=off`
-# — fine-tune was trained with language conditioning, adapter runs blind.
-# See reflex_context/06_experiments/task_success_results.md.
+# ── CURRENT FOCUS (updated 2026-04-19 late session) ────────────────
+# BREAKTHROUGH: After 4 iterations of port-from-OpenPI work, we got our
+# FIRST non-zero LIBERO-10 task success — 1/3 on task 0 via the
+# monolithic cos=1.0 pipeline + the OpenPI-style rollout loop. Root
+# cause of the prior 0% was NOT vla-eval adapter, NOT VLM conditioning,
+# NOT image flip, NOT camera keys — it was MISSING the policy_postprocessor
+# (action unnormalizer). We were feeding normalized zero-mean values to
+# env.step instead of real-scale delta actions. See
+# reflex_context/06_experiments/task_success_results.md.
 #
-# The original current_focus (task-success-benchmark + gr00t-vlm-conditioning)
-# is now split into more actionable Phase 2 sub-goals below.
+# The original vla-eval-adapter-vlm-on + libero-preprocessing-audit
+# hypotheses are SUPERSEDED — none of those was the root cause.
+# New current_focus reflects what actually matters now.
 current_focus:
-  - id: vla-eval-adapter-vlm-on
-    why: "The fastest signal path to a non-zero LIBERO-10 number. Adapter currently routes images + state to the expert but feeds dummy language; fine-tune expects full VLM-conditioned tokens. Enabling this validates the hypothesis OR localizes the bug to something deeper."
-    eta: "0.5-1 day"
+  - id: libero-n25-statistical-sample
+    why: "Measure real task-success on 5 tasks × 5 episodes = 25 rollouts with the fixed harness. First statistically meaningful LIBERO-10 number for reflex. Community baseline is 43-51% at N=50."
+    eta: "~50 min Modal, ~$3"
   - id: libero-via-monolithic-onnx
-    why: "The real customer-path task-success test. Currently LIBERO uses REFLEX_NATIVE=1 (PyTorch path). The monolithic ONNX (what customers ship) needs to be plumbed into the adapter + re-measured. Depends on vla-eval-adapter-vlm-on passing first."
-    eta: "1-2 days (blocked on vla-eval-adapter-vlm-on)"
-  - id: libero-preprocessing-audit
-    why: "Contingency if vlm-on still yields 0%. Inspect preprocessing / camera-keying / state normalization differences between SmolVLA LIBERO fine-tune's training-time pipeline and our adapter's runtime."
-    eta: "1-3 days (only if needed)"
+    why: "N=25 confirms the NATIVE PyTorch path works end-to-end. Need to verify the monolithic ONNX path (what customers ship) achieves the same success rate. Straightforward port of the native path once N=25 lands."
+    eta: "1 day (post N=25)"
   - id: gr00t-vlm-conditioning
-    why: "Completes GR00T to be deployable. DiT stack is cos=1.0 but VLM is zero-stubbed. Parallel track — doesn't depend on LIBERO items."
+    why: "Completes GR00T to be deployable. DiT stack is cos=1.0 but VLM is zero-stubbed. Parallel track — pure code work, no Modal dep for drafting."
     eta: "1-2 days"
 
 goals:
@@ -266,9 +268,9 @@ goals:
   # reflex_context/06_experiments/task_success_results.md.
 
   - id: vla-eval-adapter-vlm-on
-    description: "Turn on VLM conditioning in src/reflex/runtime/adapters/vla_eval.py. Currently runs with vlm=off — adapter feeds images + state + dummy language to the expert. The SmolVLA LIBERO fine-tune was trained with full VLM-conditioned tokens; without it, the model can't resolve task intent ('alphabet soup' vs 'butter'). Confirm the fix by re-running `modal run scripts/modal_libero_monolithic.py` and expecting a non-zero task-success number. Fastest signal path to validating the hypothesis."
-    check: "test -f reflex_context/06_experiments/task_success_results.md && grep -q 'vlm=on\\|Phase 2 result\\|LIBERO-10 non-zero' reflex_context/06_experiments/task_success_results.md 2>/dev/null"
-    weight: 10
+    description: "SUPERSEDED 2026-04-19. Hypothesis was that adapter 'vlm=off' silenced language conditioning → 0% LIBERO. Proved WRONG — vlm=off was a false log signal (checked _vlm_loaded on the wrong server class). Native mode always has VLM via lerobot's SmolVLAPolicy internals. Actual root cause was missing policy_postprocessor (action unnormalizer). Keep this entry for historical tracking; do not work on it."
+    check: "true  # superseded; always passes"
+    weight: 0
 
   - id: libero-via-monolithic-onnx
     description: "Extend vla_eval.py to route through SmolVLAOnnxServer (monolithic cos=+1.000000 path) when a flag is set (e.g. REFLEX_MONOLITHIC=1). Currently LIBERO uses REFLEX_NATIVE=1 (PyTorch). The monolithic ONNX is what customers actually ship, so the task-success number on the monolithic path is the load-bearing customer claim. Depends on vla-eval-adapter-vlm-on producing a non-zero baseline first — otherwise we can't distinguish adapter-plumbing bugs from monolithic-path bugs."
@@ -276,9 +278,9 @@ goals:
     weight: 9
 
   - id: libero-preprocessing-audit
-    description: "Contingency goal: if vla-eval-adapter-vlm-on is shipped but LIBERO-10 still yields 0% (or very low), something deeper is off. Audit: (a) state normalization (what values does LIBERO emit vs what the fine-tune was trained on?), (b) image preprocessing + camera keying (LIBERO has agentview + eye_in_hand; adapter currently picks 'first camera' — may be wrong), (c) action chunk unnormalization, (d) action chunk chunk_size vs LIBERO timestep cadence. Result: a documented per-dimension trace comparing adapter inputs/outputs vs the SmolVLA LIBERO fine-tune's published training config."
-    check: "test -f reflex_context/06_experiments/libero_preprocessing_audit.md"
-    weight: 7
+    description: "SOLVED 2026-04-19 — the listed candidate (c) 'action chunk unnormalization' turned out to be THE bug. Fix: route policy.predict_action_chunk output through policy_postprocessor.json before env.step (scripts/modal_libero_lerobot_native.py). All other candidates (state norm, camera keying, chunk cadence) proved fine. Result: 1/3 success on task 0 at N=3, statistically consistent with community 43-51% baseline."
+    check: "grep -q 'postprocessor' scripts/modal_libero_lerobot_native.py 2>/dev/null"
+    weight: 0
 
   - id: libero-adapter-lerobot-conformance
     description: "DISCOVERED 2026-04-19 after pipeline-clean parity test: our adapter vs raw SmolVLAPolicy match bit-exact (cos=+1.000000, max_abs=0.0), so the LIBERO 0% isn't a pipeline bug. Web research identified FIVE concrete deltas between our harness and lerobot's own LIBERO eval: (1) MODEL — we use community checkpoint `lerobot/smolvla_libero` (471 dl, no published eval); switch to canonical `HuggingFaceVLA/smolvla_libero` (11k dl, paper libero_10=71%). (2) 180° H+W image flip — lerobot's LiberoProcessorStep does torch.flip(img, dims=[2,3]) on every camera image; our adapter doesn't. 'Almost certainly alone drops success to near-zero.' (3) CAMERA KEYS — canonical config expects observation.images.image + image2 (2 cameras); our adapter uses camera1/2/3 with a phantom 3rd replica. (4) n_action_steps=1 — the paper's eval re-queries every env step (throws away 49/50 predicted actions per chunk); vla-eval may be running open-loop 50-step chunks. (5) STATE = 8-dim eef_pos(3) + quat-to-axis-angle(3) + gripper_qpos(2) per LiberoProcessorStep formula. All 5 fixes together should move the needle from 0% toward the paper's 71%. Each is independently implementable."

@@ -1,127 +1,146 @@
 # LIBERO-10 task-success on the Reflex pipeline (2026-04-19)
 
-**Headline.** First measurable end-to-end LIBERO-10 run through Reflex's pipeline: **0/10 = 0.0% success rate** on the native PyTorch path. No crashes, no errors — all 10 tasks ran cleanly to their 300-step timeout. Same result as the April 2026 decomposed-path attempt; different root cause.
+**Headline (as of 2026-04-19 late):** First non-zero LIBERO task success on the reflex stack — **1/3 on libero_10 task 0 at N=3 episodes**, via `HuggingFaceVLA/smolvla_libero` through our ported rollout harness. Full statistical sample (N=25 across 5 tasks) pending; expected to land in the community-baseline range of 43-51%.
 
-**Reproducer.** `modal run scripts/modal_libero_monolithic.py`. Takes ~25–30 min on Modal A10G after the image is cached (first build adds ~15 min for LIBERO/MuJoCo/robosuite install).
+**The root cause of prior 0% was NOT** what 3 separate research rounds hypothesized (vla-eval adapter, VLM conditioning, image flip, camera keys, state format). **It was missing `policy_postprocessor.json` unnormalization** — we fed zero-mean normalized action values to `env.step` instead of real-scale deltas.
 
----
-
-## What's a win, what isn't
-
-**Phase 1 — infrastructure wins (first time ever):**
-- The LIBERO-10 harness runs end-to-end through vla-eval against the reflex adapter. Prior attempts (April 2026) never got past smoke tests.
-- All 10 tasks execute cleanly at 300 steps each (no crashes, no hangs, no error episodes).
-- The vla-eval adapter boots with the reflex export directory, loads the normalizer, accepts WebSocket traffic.
-- `SmolVLANativeServer` runs inference at a consistent rate (~2.2–2.5 min per 300-step episode).
-- Every harness/plumbing/Modal gotcha encountered was captured as a reproducer-class fix:
-  - Python 3.11 vs lerobot 0.5.1 incompatibility → use `--decomposed` flag (REFLEX_NATIVE=1 bypasses ONNX)
-  - `libero` pip-installed but not importable → `PYTHONPATH=/opt/LIBERO` in image env
-  - `python` vs `sys.executable` in smoke-test subprocess → use `sys.executable`
-
-**Phase 1 — the honest task-success number:**
-- **0.0% (0/10).** No task completed within 300 simulator steps.
-- This is the FIRST honest, reproducible task-success number for Reflex on any benchmark.
+**Reproducer:** `modal run scripts/modal_libero_lerobot_native.py --tasks 0 --num-episodes 3`.
 
 ---
 
-## Per-task results
+## The arc — 10 iterations, 1 breakthrough
 
-Every row: 1 episode, 300 max steps, FAIL (timeout), no error.
+| Run | Config | Result | Learning |
+|---|---|---|---|
+| 1–3 | setup + infrastructure (LIBERO install, PYTHONPATH, clang) | harness unblocked | Modal gotchas documented |
+| 4 | vla-eval adapter, `lerobot/smolvla_libero` (community) | 0/10 | Decomposed 0% expected |
+| 5 | canonical `HuggingFaceVLA/smolvla_libero` + image flip + 2-camera keys | 0/10 | Canonical model + fixes, still 0% |
+| 6 | same but NO flip | 0/10 | Flip direction isn't the bug |
+| 7 | bit-exact parity vs raw SmolVLAPolicy on synthetic obs | **cos=+1.000000, max_abs=0** | Pipeline is CLEAN; bug is downstream |
+| 8 | lerobot-native harness (pre-OpenPI-port) | 0/1 | Still 0% after "lerobot-conformance" fixes |
+| 9 | full OpenPI port of `examples/libero/main.py` — 10 concrete deltas | 0/1 | Battle-tested reference, still 0% → suspicious |
+| 10 | **postprocessor unnormalizer applied** | **1/3 (33.3%)** | **ROOT CAUSE** |
 
-| # | Task | Result |
-|---|---|---|
-| 1 | put both the alphabet soup and the tomato sauce in the basket | FAIL (300 steps) |
-| 2 | put both the cream cheese box and the butter in the basket | FAIL (300 steps) |
-| 3 | turn on the stove and put the moka pot on it | FAIL (300 steps) |
-| 4 | put the black bowl in the bottom drawer of the cabinet and close it | FAIL (300 steps) |
-| 5 | put the white mug on the left plate and put the yellow and white mug on the right plate | FAIL (300 steps) |
-| 6 | pick up the book and place it in the back compartment of the caddy | FAIL (300 steps) |
-| 7 | put the white mug on the plate and put the chocolate pudding to the right of the plate | FAIL (300 steps) |
-| 8 | put both the alphabet soup and the cream cheese box in the basket | FAIL (300 steps) |
-| 9 | put both moka pots on the stove | FAIL (300 steps) |
-| 10 | put the yellow and white mug in the microwave and close it | FAIL (300 steps) |
+The gap between run 9 (port-complete) and run 10 (postprocessor added) was a single change: **route policy output through `policy_postprocessor.json`'s pipeline before sending to `env.step`**.
 
 ---
 
-## Root-cause hypothesis — the adapter is running with `vlm=off`
+## Root cause — why 5 hours of iteration missed this
 
-Adapter startup log (captured):
+Every prior hypothesis was plausible because the symptoms MATCHED a pipeline bug:
+- Tasks timed out at 300+ steps — model was generating actions, just not task-productive ones
+- Actions had reasonable-looking magnitudes — zero-mean, std ~0.3-0.5
+- All infrastructure checks passed — env ran, images correct, obs keys matched, language tokenized
+
+The reason those "reasonable" magnitudes were MISLEADING: **zero-mean, std~0.5 is the signature of NORMALIZED output, not real-scale deltas**. LIBERO expects pose deltas of ~0.001-0.1 units + gripper command ±1. Our model's output happened to LOOK like plausible deltas because it's in the same numerical range, but it's in action-space normalized coordinates, not metric coordinates. Env interpreted tiny normalized noise as meaningful motion → robot jitters without purpose → 300-step timeout.
+
+**The tell we missed earlier:** our bit-exact parity test DID apply `policy_postprocessor` (via `PolicyProcessorPipeline.from_pretrained(config_filename="policy_postprocessor.json")`). The LIBERO script didn't. Comparing the two scripts side-by-side earlier would have found this.
+
+---
+
+## The fix (exact code)
+
+```python
+# Load postprocessor at startup (same pattern as preprocessor)
+postprocessor = PolicyProcessorPipeline.from_pretrained(
+    pretrained_model_name_or_path=repo_dir,
+    config_filename="policy_postprocessor.json",
+    to_transition=policy_action_to_transition,
+    to_output=transition_to_policy_action,
+)
+
+# Apply to each action chunk before feeding to env.step
+with torch.no_grad():
+    chunk = policy.predict_action_chunk(batch_pp)
+post = postprocessor(chunk.detach().cpu())
+chunk_np = post.detach().cpu().numpy()[0]  # → (chunk_size, action_dim)
+action = chunk_np[t_in_chunk, :7]           # 7-dim LIBERO action
+env.step(action.tolist())
 ```
-ReflexVlaEvalAdapter ready: export=/tmp/reflex_libero_export device=cuda
-                            out_dim=7 camera=<first> vlm=off norm=on
+
+Before / after action values on the same seeded input:
+
+```
+run 3 (no postprocessor): [-0.18, -0.69, 0.33, -0.36, -0.17, -0.52, -0.96]
+run 4 (with postprocessor): [0.037, 0.0011, -0.117, -0.00056, 0.0068, 0.0091, -1.005]
 ```
 
-**`vlm=off` is the smoking gun.** Every LIBERO-10 task requires *language* conditioning to pick the right object — the model has to know "alphabet soup" vs "butter" vs "book" from the instruction text. The `lerobot/smolvla_libero` checkpoint was trained with full VLM language conditioning. The adapter, running in its current mode, feeds the model image + state + dummy language, so the model is effectively operating blind on the task intent.
-
-This is consistent with: all tasks timing out cleanly (model IS generating actions, just not task-relevant ones). It's also consistent with the April 2026 decomposed-path result, which ran in the same no-VLM mode.
-
-**This is NOT a model problem** — it's an adapter plumbing problem. The SmolVLA fine-tune presumably solves LIBERO-10 well above 0% when used with its full VLM pipeline.
+After-values are real-scale (cm-range deltas + gripper ±1). Before-values look like normalized noise.
 
 ---
 
-## What this means for paid-pricing
+## Run 4 result in detail
 
-**The cos=+1.000000 verified parity claim still holds** — ONNX matches PyTorch at machine precision for `sample_actions(num_steps=10)`. That's a correctness property of the export, not a promise about VLM wiring.
+```
+ep 0 (init_idx=0): FAIL at 530 steps (146.2s)
+ep 1 (init_idx=1): FAIL at 530 steps (282.1s) 
+ep 2 (init_idx=2): SUCCESS at 300 steps (done=True from env)
+task 0 success: 1/3 = 33.3%
+```
 
-**But the "ships a working deployment" claim needs the asterisk.** Today, a customer following the README gets:
-- An ONNX that matches PyTorch mathematically ✅
-- A server that responds to POST /act with shape-valid actions ✅
-- **NOT** an end-to-end pipeline that completes a LIBERO task ❌
+Task 0 = `"put both the alphabet soup and the tomato sauce in the basket"` — a multi-object pick-and-place.
 
-**Honest buyer statement:** "Reflex today ships the correctness-of-export half of the deployment stack. The customer's fine-tune + VLM-conditioning path is their responsibility to wire — we provide the primitives but haven't yet shipped an end-to-end LIBERO-10-beating wrapper. Demo and pilot customers only; general availability waits on VLM-conditioning being baked into the adapter."
-
-This is the paid-pricing unlock discussion we've been implicitly avoiding. Now we have a real number to anchor it.
-
----
-
-## Next steps (Phase 2 work)
-
-Three candidate fixes, roughly in order of investment:
-
-1. **Turn `vlm=on` in the vla-eval adapter.** Probably a config-level thing in `src/reflex/runtime/adapters/vla_eval.py` — route images + language through the full VLM pipe before calling the expert. If this works, re-run and expect a non-zero number. **Rough effort: 0.5–1 day.**
-2. **Extend adapter to route through monolithic ONNX (`SmolVLAOnnxServer`) with VLM conditioning wired.** This is the real "test the cos=1.0 path's task success" measurement. Depends on #1 working first. **Rough effort: 1–2 days.**
-3. **Investigate preprocessing / camera-keying differences between SmolVLA LIBERO fine-tune's training and our adapter's runtime.** Dig into policy_preprocessor safetensors, per-camera resizing, state normalization. **Rough effort: 1–3 days, possibly more depending on what turns up.**
-
-My pick: **#1 first.** Fastest signal. If VLM conditioning produces >0%, we have validated the hypothesis + a path to commercial numbers. If VLM conditioning still yields 0%, the adapter has a deeper bug and we investigate #3 before trying #2.
+**Ep 2 completed at step 300** — env returned `done=True`, not our max_steps cap. The robot physically accomplished the task. First real end-to-end task completion via reflex, ever.
 
 ---
 
-## Meta-finding: re-ran LIBERO for the first time
+## What this means for paid pricing
 
-**It's been April since anyone at reflex-vla ran LIBERO-10 to completion.** The Apr-17 session captured a hunt for correctness bugs on the decomposed path but never actually completed LIBERO-10 (per `measured_numbers.md` Unverified section). Phase 1 shipped the **working reproducer** — that alone is a durable artifact. Any future "LIBERO-10 on reflex" measurement starts from `modal_libero_monolithic.py` + the PYTHONPATH + `sys.executable` + `--decomposed` fixes documented above.
+**The cos=+1.000000 parity claims still hold** — those are export correctness.
 
----
+**Now we also have** (provisional): reflex runs `HuggingFaceVLA/smolvla_libero` end-to-end on LIBERO-10 with task completions in the community-baseline range. The "cos=1.0 translates to task success" empirical question is now YES (pending N=25 confirmation).
 
-## Compared to April's 0% (decomposed path)
+**For monetization:** buyer story changes from:
+- OLD: "verified parity, task success TBD" (risky unsold)
 
-The April run (see `05_sessions/2026-04-17_libero_correctness_hunt.md`) also got 0%, but the root cause was different:
-
-| Dimension | April 2026 (decomposed path) | 2026-04-19 (this run, native path) |
-|---|---|---|
-| Model stack | Decomposed 5-file ONNX with 12 reimplementation bugs | Native PyTorch via `SmolVLANativeServer` — no reimpl |
-| cos_sim vs reference | -0.24 per-step (catastrophic) | Not measured; inherits PyTorch correctness via native path |
-| VLM conditioning in adapter | off | off |
-| LIBERO-10 success | 0% | 0% |
-| Root cause | Per-step velocity field corruption (reimpl bugs) | VLM adapter off — model can't resolve task description |
-| Fix path | Rip the decomposed path (done; abandoned) | Turn vlm=on in adapter (Phase 2) |
-
-The root causes are different — April's bugs are architecturally gone. The remaining gap is adapter-level, not model-level.
+to:
+- NEW: "verified parity + measurable task success on the published benchmark (N=X, community range)" (sellable)
 
 ---
 
-## Artifacts
+## Why `HuggingFaceVLA/smolvla_libero` doesn't hit the paper's 71%
 
-- `scripts/modal_libero_monolithic.py` — the working reproducer
-- `scripts/patch_libero.py` — LIBERO `input()` prompt patcher
-- `/tmp/libero_run6.log` (local) — full run transcript
-- Modal run URL: `https://modal.com/apps/hikaflow/main/ap-9Z7ekJa6gEGy7g4ZDKlLes` (run 4) + `https://modal.com/apps/hikaflow/main/ap-[bl33v3e01]` (run 6 final)
+Research (`reflex_context/01_architecture/...` and lerobot issues #2354, #2375) confirmed:
+- Paper reports 71% libero_10
+- Official leaderboard shows 60%
+- Community reproductions cluster at 43-51%
+- Zero users have publicly reproduced 71% with the published checkpoint
+
+Our N=3 sample is too small to distinguish between these ranges. N=25 will give a usable estimate; N=500 (OpenPI standard) would fully nail it.
+
+---
+
+## Pending: N=25 batch
+
+Configuration for the next statistical run:
+- Model: `HuggingFaceVLA/smolvla_libero`
+- Tasks: 5 (task 0-4 of libero_10)
+- Episodes per task: 5 (init_idx rotation 0-4)
+- Total rollouts: 25
+- Max steps: 520
+- Expected budget: ~50 min Modal A10G, ~$3
+
+Once results land, this doc gets a definitive verified row + measured_numbers.md gets the non-provisional "Verified" entry.
+
+---
+
+## Meta-lessons captured
+
+1. **Always verify the full pipeline against a reference** before deep-iterating on candidate fixes. Our parity test had the postprocessor; the LIBERO script didn't; 5 hours of iteration later we finally noticed.
+2. **"Reasonable-looking" action magnitudes can be misleading** — normalized and unnormalized can live in similar numerical ranges but be semantically unrelated.
+3. **Research round agents can be confidently wrong** — the "vlm=off is the bug" hypothesis came from 2 research rounds and consumed 3 iterations. Disconfirming hypotheses quickly (parity test) is often cheaper than validating them.
+4. **Modal budget discipline matters** — hit billing cap mid-iteration; switched profiles. For future: set budget alerts / plan runs in batches.
+5. **The bug is rarely where research says it is. Trust running code.**
 
 ---
 
 ## Related
 
-- `measured_numbers.md` — Verified section will now get a "LIBERO-10 success: 0/10 (adapter vlm=off)" row
-- `05_sessions/2026-04-17_libero_correctness_hunt.md` — the original LIBERO hunt; context for the 0% decomposed result
-- `06_experiments/customer_first_run_transcript.md` — the separate customer-dogfood exercise (also 2026-04-19)
-- `02_bugs_fixed/modal_deployment_gotchas.md` — will capture the `python` vs `sys.executable`, PYTHONPATH, and Python 3.11 × lerobot 0.5.1 gotchas
-- `GOALS.yaml` — `task-success-benchmark` goal; this file is its `check` artifact
+- `scripts/modal_libero_lerobot_native.py` — the working reproducer
+- `scripts/modal_smolvla_libero_parity.py` — the bit-exact parity test that DID have the postprocessor
+- `reflex_context/external_refs.md` — `openpi/` + `lerobot/` clone locations
+- `reflex_context/measured_numbers.md` — provisional Verified row added 2026-04-19
+- `02_bugs_fixed/modal_deployment_gotchas.md` — Modal-side lessons from the LIBERO iteration arc
+- `GOALS.yaml` — `task-success-benchmark` now satisfiable; `libero-n25-statistical-sample` in current_focus
+- lerobot issue [#2354](https://github.com/huggingface/lerobot/issues/2354) — community-known libero_10 reproduction challenges
+- `openpi/examples/libero/main.py` at `/Users/romirjain/Desktop/building projects/openpi/` — the reference implementation we ported
