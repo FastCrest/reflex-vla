@@ -80,6 +80,23 @@ class SmolVLAOnnxServer:
     def ready(self) -> bool:
         return self._ready
 
+    def _get_tokenizer(self):
+        """Load SmolLM2 tokenizer with pad_token set. Cached per instance.
+
+        Without pad_token set, `tokenizer(padding="max_length")` raises
+        `Asking to pad but the tokenizer does not have a padding token`,
+        and the silent-fallback path zeros out the instruction. Customer
+        dogfood 2026-04-19 caught this silent failure.
+        """
+        if getattr(self, "_tokenizer", None) is None:
+            from transformers import AutoTokenizer
+            tok = AutoTokenizer.from_pretrained("HuggingFaceTB/SmolLM2-135M")
+            # SmolLM2 ships without a pad_token. Set it to eos_token (standard HF pattern).
+            if tok.pad_token is None:
+                tok.pad_token = tok.eos_token
+            self._tokenizer = tok
+        return self._tokenizer
+
     def predict(
         self,
         image: np.ndarray | list[np.ndarray] | None = None,
@@ -125,8 +142,7 @@ class SmolVLAOnnxServer:
         # Lang: tokenize (SmolLM2 vocab ~49152) or use provided tokens
         if lang_tokens is None:
             try:
-                from transformers import AutoTokenizer
-                tok = AutoTokenizer.from_pretrained("HuggingFaceTB/SmolLM2-135M")
+                tok = self._get_tokenizer()
                 enc = tok(
                     instruction or " ",
                     return_tensors="np", padding="max_length",
@@ -135,7 +151,13 @@ class SmolVLAOnnxServer:
                 lang_tokens = enc["input_ids"].astype(np.int64)
                 lang_masks = enc["attention_mask"].astype(np.bool_)
             except Exception as e:
-                logger.warning("Tokenizer unavailable (%s); using zeros", e)
+                # Fall back silently BUT LOUDLY — this breaks instruction-following
+                # so we want it painfully visible in the log.
+                logger.error(
+                    "SEVERE: tokenizer failed (%s). Instruction '%s' has NO effect "
+                    "on the output — actions are a function of state+images only. "
+                    "Fix the tokenizer before trusting /act responses.", e, instruction,
+                )
                 lang_tokens = np.zeros((1, 16), dtype=np.int64)
                 lang_masks = np.ones((1, 16), dtype=np.bool_)
         if lang_masks is None:
@@ -181,6 +203,9 @@ class SmolVLAOnnxServer:
         elapsed_ms = (time.perf_counter() - t0) * 1000
         actions_out = actions[0]
 
+        # `denoising_steps` is the README-documented field; `num_denoising_steps`
+        # is the internal config key name. Emit both for backwards compat.
+        steps = int(self.config.get("num_denoising_steps", 1))
         return {
             "actions": actions_out.tolist(),
             "num_actions": int(actions_out.shape[0]),
@@ -188,7 +213,8 @@ class SmolVLAOnnxServer:
             "latency_ms": round(elapsed_ms, 1),
             "hz": round(1000.0 / elapsed_ms, 1) if elapsed_ms > 0 else 0,
             "inference_mode": self._inference_mode,
-            "num_denoising_steps": int(self.config.get("num_denoising_steps", 1)),
+            "denoising_steps": steps,
+            "num_denoising_steps": steps,
         }
 
     # --- create_app lifespan compat ---------------------------------------

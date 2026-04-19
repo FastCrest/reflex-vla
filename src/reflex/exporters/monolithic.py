@@ -417,6 +417,7 @@ def export_smolvla_monolithic(
     output_dir: str | Path,
     *,
     num_steps: int = 10,
+    target: str = "desktop",
 ) -> dict[str, Any]:
     """Export SmolVLA as a single monolithic ONNX.
 
@@ -513,7 +514,7 @@ def export_smolvla_monolithic(
 
     _write_reflex_config(
         output_dir, policy.config, num_steps=num_steps,
-        model_id=model_id, model_type="smolvla",
+        model_id=model_id, model_type="smolvla", target=target,
     )
 
     size_mb = onnx_path.stat().st_size / 1e6
@@ -532,6 +533,7 @@ def export_pi0_monolithic(
     output_dir: str | Path,
     *,
     num_steps: int = 10,
+    target: str = "desktop",
 ) -> dict[str, Any]:
     """Export pi0 as a single monolithic ONNX.
 
@@ -622,7 +624,7 @@ def export_pi0_monolithic(
 
     _write_reflex_config(
         output_dir, policy.config, num_steps=num_steps,
-        model_id=model_id, model_type="pi0",
+        model_id=model_id, model_type="pi0", target=target,
     )
 
     size_mb = onnx_path.stat().st_size / 1e6
@@ -643,11 +645,13 @@ def _write_reflex_config(
     num_steps: int,
     model_id: str,
     model_type: str,
+    target: str = "desktop",
 ) -> None:
     """Write `reflex_config.json` so `reflex serve` knows what to load."""
     cfg_dict = {
         "model_id": model_id,
         "model_type": model_type,
+        "target": target,
         "num_denoising_steps": num_steps,
         "chunk_size": getattr(policy_config, "chunk_size", 50),
         "action_chunk_size": getattr(policy_config, "chunk_size", 50),
@@ -667,6 +671,7 @@ def export_pi05_monolithic(
     output_dir: str | Path,
     *,
     num_steps: int = 10,
+    target: str = "desktop",
 ) -> dict[str, Any]:
     """Export pi0.5 as a single monolithic ONNX.
 
@@ -767,7 +772,7 @@ def export_pi05_monolithic(
 
     _write_reflex_config(
         output_dir, policy.config, num_steps=num_steps,
-        model_id=model_id, model_type="pi05",
+        model_id=model_id, model_type="pi05", target=target,
     )
 
     size_mb = onnx_path.stat().st_size / 1e6
@@ -843,6 +848,7 @@ def export_gr00t_monolithic(
     output_dir: str | Path,
     *,
     num_steps: int = 4,
+    target: str = "desktop",
     embodiment_id: int = 0,
 ) -> dict[str, Any]:
     """Export GR00T N1.6 as a single monolithic ONNX.
@@ -918,6 +924,7 @@ def export_gr00t_monolithic(
         num_steps=num_steps,
         model_id=model_id,
         model_type="gr00t",
+        target=target,
     )
 
     size_mb = onnx_path.stat().st_size / 1e6
@@ -939,6 +946,7 @@ def export_monolithic(
     *,
     num_steps: int = 10,
     model_type: str | None = None,
+    target: str = "desktop",
 ) -> dict[str, Any]:
     """Dispatch to the right model-specific exporter.
 
@@ -962,18 +970,18 @@ def export_monolithic(
             )
 
     if model_type == "smolvla":
-        return export_smolvla_monolithic(model_id, output_dir, num_steps=num_steps)
+        return export_smolvla_monolithic(model_id, output_dir, num_steps=num_steps, target=target)
     if model_type == "pi0":
-        return export_pi0_monolithic(model_id, output_dir, num_steps=num_steps)
+        return export_pi0_monolithic(model_id, output_dir, num_steps=num_steps, target=target)
     if model_type == "pi05":
-        return export_pi05_monolithic(model_id, output_dir, num_steps=num_steps)
+        return export_pi05_monolithic(model_id, output_dir, num_steps=num_steps, target=target)
     if model_type == "gr00t":
         # GR00T is DDPM per-step; num_steps is runtime loop count, not baked.
         # Clamp the default pi-family num_steps=10 to GR00T's canonical 4 if
         # the caller didn't override. This only affects the informational
         # reflex_config.json field.
         gr00t_steps = 4 if num_steps == 10 else num_steps
-        return export_gr00t_monolithic(model_id, output_dir, num_steps=gr00t_steps)
+        return export_gr00t_monolithic(model_id, output_dir, num_steps=gr00t_steps, target=target)
 
     raise ValueError(
         f"Monolithic export for model_type={model_type!r} not yet supported."

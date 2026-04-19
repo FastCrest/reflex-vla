@@ -203,6 +203,9 @@ class Pi0OnnxServer:
         elapsed_ms = (time.perf_counter() - t0) * 1000
         actions_out = actions[0]  # drop batch dim for single-request response
 
+        # `denoising_steps` is the README-documented field; `num_denoising_steps`
+        # is the internal config key name. Emit both for backwards compat.
+        steps = int(self.config.get("num_denoising_steps", 1))
         return {
             "actions": actions_out.tolist(),
             "num_actions": int(actions_out.shape[0]),
@@ -210,7 +213,8 @@ class Pi0OnnxServer:
             "latency_ms": round(elapsed_ms, 1),
             "hz": round(1000.0 / elapsed_ms, 1) if elapsed_ms > 0 else 0,
             "inference_mode": self._inference_mode,
-            "num_denoising_steps": int(self.config.get("num_denoising_steps", 1)),
+            "denoising_steps": steps,
+            "num_denoising_steps": steps,
         }
 
     # --- create_app lifespan compat ---------------------------------------

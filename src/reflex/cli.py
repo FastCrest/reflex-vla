@@ -105,7 +105,7 @@ def export(
         import time
         start = time.perf_counter()
         try:
-            result = export_monolithic(model, output, num_steps=num_steps)
+            result = export_monolithic(model, output, num_steps=num_steps, target=target)
         except ImportError as exc:
             console.print(f"[red]Missing monolithic dep: {exc}[/red]")
             raise typer.Exit(2)

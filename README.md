@@ -27,6 +27,8 @@ pip install 'reflex-vla[serve,gpu,monolithic] @ git+https://github.com/rylinjame
 
 # 2. Export any supported VLA to ONNX (auto-detects model type)
 # SmolVLA fits on Orin Nano 8GB; pi0 (~12GB monolithic) needs Orin 16GB+ or desktop GPU.
+# Note: first export is 5-15 min (SmolVLA ~10min, pi0 ~7min on A100). Subsequent
+# `reflex serve` calls reuse the cached artifact and warm up in 10-70s.
 reflex export lerobot/smolvla_base --target desktop --output ./smol
 
 # 3. Serve it — POST /act to get 50-step action chunks
