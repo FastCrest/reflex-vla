@@ -375,16 +375,227 @@ def denoise_loop_parity(
     }
 
 
+@app.function(
+    image=image,
+    gpu="A100-40GB",
+    timeout=3600,
+    volumes={HF_CACHE_PATH: hf_cache, ONNX_OUTPUT_PATH: onnx_output},
+    secrets=[_hf_secret()],
+)
+def export_gr00t_with_vlm_modal(
+    model_id: str = "nvidia/GR00T-N1.6-3B",
+    embodiment_id: int = 0,
+):
+    """Export GR00T full-stack WITH state + vlm_kv inputs (Step 4a, 2026-04-19).
+
+    Extends the prior zero-stub export. Now takes FIVE inputs:
+      noisy_actions, timestep, position_ids, state, vlm_kv
+
+    Output: velocity_raw [B, chunk, raw_action_dim].
+
+    Differences vs export_gr00t_monolithic_modal:
+    - state + vlm_kv are first-class inputs (not zero-stubbed)
+    - uses the Step 2 state_encoder port + Step 3 fixed pos_embed logic
+    - produces expert_stack_with_vlm.onnx (kept separate from the old
+      model.onnx for compatibility with existing reflex serve config)
+    """
+    import time
+    from pathlib import Path
+
+    import torch
+
+    from reflex.checkpoint import load_checkpoint
+    from reflex.exporters.gr00t_exporter import build_gr00t_full_stack
+
+    print(f"[modal-vlm] Loading {model_id}...")
+    t0 = time.time()
+    state_dict, _ = load_checkpoint(model_id)
+    print(f"[modal-vlm] Checkpoint loaded in {time.time()-t0:.1f}s "
+          f"({len(state_dict)} tensors)")
+
+    print(f"[modal-vlm] Building GR00T full stack w/ state_encoder "
+          f"(embodiment={embodiment_id})...")
+    t0 = time.time()
+    full, meta = build_gr00t_full_stack(state_dict, embodiment_id=embodiment_id)
+    full.eval()
+    assert meta.get("has_state_encoder"), (
+        "build_gr00t_full_stack did not load state_encoder — "
+        "Step 4a requires N1.6 checkpoint with action_head.state_encoder.*"
+    )
+    print(f"[modal-vlm] Built in {time.time()-t0:.1f}s — "
+          f"raw_action_dim={meta['raw_action_dim']}, "
+          f"raw_state_dim={meta['raw_state_dim']}, "
+          f"full_stack_params={meta['full_stack_params_m']:.1f}M")
+
+    raw_action_dim = meta["raw_action_dim"]
+    raw_state_dim = meta["raw_state_dim"]
+    chunk = 50
+    B = 1
+    vlm_kv_seq = 256
+    vlm_kv_dim = 2048
+
+    dummy_actions = torch.randn(B, chunk, raw_action_dim, dtype=torch.float32)
+    dummy_time = torch.tensor([0.5], dtype=torch.float32)
+    dummy_pos = torch.arange(chunk + 1, dtype=torch.long).unsqueeze(0)
+    dummy_state = torch.randn(B, raw_state_dim, dtype=torch.float32)
+    dummy_vlm_kv = torch.randn(B, vlm_kv_seq, vlm_kv_dim, dtype=torch.float32)
+
+    output_dir = Path(ONNX_OUTPUT_PATH) / "monolithic_with_vlm"
+    output_dir.mkdir(parents=True, exist_ok=True)
+    onnx_path = output_dir / "expert_stack_with_vlm.onnx"
+
+    print("[modal-vlm] torch.onnx.export (opset 19, 5 inputs)...")
+    t0 = time.time()
+    torch.onnx.export(
+        full,
+        (dummy_actions, dummy_time, dummy_pos, dummy_state, dummy_vlm_kv),
+        str(onnx_path),
+        input_names=["noisy_actions", "timestep", "position_ids", "state", "vlm_kv"],
+        output_names=["velocity"],
+        dynamic_axes={
+            "noisy_actions": {0: "batch"},
+            "timestep": {0: "batch"},
+            "position_ids": {0: "batch"},
+            "state": {0: "batch"},
+            "vlm_kv": {0: "batch", 1: "vlm_seq"},
+            "velocity": {0: "batch"},
+        },
+        opset_version=19,
+    )
+    print(f"[modal-vlm] ONNX conversion: {time.time()-t0:.1f}s")
+
+    onnx_output.commit()
+
+    if not onnx_path.exists():
+        return {"status": "fail", "reason": "onnx file not created"}
+
+    size_mb = onnx_path.stat().st_size / 1e6
+    data_files = (list(output_dir.glob("*.data"))
+                  + list(output_dir.glob("*.bin")))
+    data_mb = sum(f.stat().st_size for f in data_files) / 1e6
+    total_mb = size_mb + data_mb
+    print(f"[modal-vlm] SUCCESS: {onnx_path}")
+    print(f"[modal-vlm]   model onnx: {size_mb:.1f}MB")
+    print(f"[modal-vlm]   external data: {data_mb:.1f}MB")
+    print(f"[modal-vlm]   total: {total_mb:.1f}MB")
+
+    return {
+        "status": "ok",
+        "onnx_path": str(onnx_path),
+        "size_mb": total_mb,
+        "raw_action_dim": raw_action_dim,
+        "raw_state_dim": raw_state_dim,
+        "embodiment_id": embodiment_id,
+    }
+
+
+@app.function(
+    image=image,
+    gpu="A100-40GB",
+    timeout=1800,
+    volumes={HF_CACHE_PATH: hf_cache, ONNX_OUTPUT_PATH: onnx_output},
+    secrets=[_hf_secret()],
+)
+def parity_test_with_vlm(model_id: str = "nvidia/GR00T-N1.6-3B"):
+    """PyTorch vs expert_stack_with_vlm.onnx single-step parity.
+
+    Runs both paths on shared seeded inputs (noisy, timestep, state,
+    vlm_kv). Target: cos=+1.000000, max_abs<1e-5.
+    """
+    import time
+    from pathlib import Path
+
+    import numpy as np
+    import torch
+    import onnxruntime as ort
+
+    from reflex.checkpoint import load_checkpoint
+    from reflex.exporters.gr00t_exporter import build_gr00t_full_stack
+
+    print(f"[parity-vlm] Loading {model_id}...")
+    state_dict, _ = load_checkpoint(model_id)
+    full, meta = build_gr00t_full_stack(state_dict, embodiment_id=0)
+    full.eval()
+
+    raw_action_dim = meta["raw_action_dim"]
+    raw_state_dim = meta["raw_state_dim"]
+    chunk = 50
+    B = 1
+    vlm_kv_seq = 256
+    vlm_kv_dim = 2048
+
+    torch.manual_seed(42)
+    noisy = torch.randn(B, chunk, raw_action_dim, dtype=torch.float32)
+    ts = torch.tensor([0.5], dtype=torch.float32)
+    pos = torch.arange(chunk + 1, dtype=torch.long).unsqueeze(0)
+    state = torch.randn(B, raw_state_dim, dtype=torch.float32)
+    vlm_kv = torch.randn(B, vlm_kv_seq, vlm_kv_dim, dtype=torch.float32)
+
+    # PyTorch
+    t0 = time.time()
+    with torch.no_grad():
+        pt_out = full(noisy, ts, pos, state=state, vlm_kv=vlm_kv)
+    print(f"[parity-vlm] pt: {tuple(pt_out.shape)} in {time.time()-t0:.1f}s")
+
+    # ONNX
+    onnx_path = Path(ONNX_OUTPUT_PATH) / "monolithic_with_vlm" / "expert_stack_with_vlm.onnx"
+    t0 = time.time()
+    sess = ort.InferenceSession(str(onnx_path), providers=["CPUExecutionProvider"])
+    ort_out = sess.run(None, {
+        "noisy_actions": noisy.numpy(),
+        "timestep": ts.numpy(),
+        "position_ids": pos.numpy().astype(np.int64),
+        "state": state.numpy(),
+        "vlm_kv": vlm_kv.numpy(),
+    })[0]
+    print(f"[parity-vlm] onnx: {ort_out.shape} in {time.time()-t0:.1f}s")
+
+    # Compare
+    pt_flat = pt_out.cpu().numpy().reshape(-1)
+    onnx_flat = ort_out.reshape(-1)
+    max_abs = float(np.abs(pt_flat - onnx_flat).max())
+    cos = float(
+        np.dot(pt_flat, onnx_flat)
+        / (np.linalg.norm(pt_flat) * np.linalg.norm(onnx_flat) + 1e-12)
+    )
+    first_pt = pt_out[0, 0, :5].cpu().numpy().tolist()
+    first_ort = ort_out[0, 0, :5].tolist()
+
+    print(f"\n====== PARITY (with-vlm ONNX vs PyTorch) ======")
+    print(f"  cos:     {cos:+.6f}")
+    print(f"  max_abs: {max_abs:.4e}")
+    print(f"  pt[0,0,:5]: {first_pt}")
+    print(f"  on[0,0,:5]: {first_ort}")
+    verdict = "PASS" if cos >= 0.9999 and max_abs < 1e-4 else "FAIL"
+    print(f"  VERDICT: {verdict}")
+
+    return {
+        "status": "ok",
+        "cos": cos,
+        "max_abs": max_abs,
+        "pt_first": first_pt,
+        "on_first": first_ort,
+        "verdict": verdict,
+    }
+
+
 @app.local_entrypoint()
-def main(parity: bool = False, loop: bool = False, num_steps: int = 4):
+def main(parity: bool = False, loop: bool = False, num_steps: int = 4,
+         vlm: bool = False, vlm_parity: bool = False):
     """GR00T monolithic export + parity tests.
 
     Flags:
-      (default)      — export monolithic ONNX
-      --parity       — single-step velocity parity (PyTorch vs ONNX)
-      --loop         — num_steps denoise-loop parity (end of chunk)
+      (default)      — export zero-stub monolithic ONNX (old)
+      --parity       — single-step velocity parity (zero-stub)
+      --loop         — num_steps denoise-loop parity (zero-stub)
+      --vlm          — export expert_stack_with_vlm.onnx (Step 4a)
+      --vlm-parity   — parity test for expert_stack_with_vlm.onnx
     """
-    if loop:
+    if vlm_parity:
+        result = parity_test_with_vlm.remote()
+    elif vlm:
+        result = export_gr00t_with_vlm_modal.remote()
+    elif loop:
         result = denoise_loop_parity.remote(num_steps=num_steps)
     elif parity:
         result = parity_test_monolithic.remote()
