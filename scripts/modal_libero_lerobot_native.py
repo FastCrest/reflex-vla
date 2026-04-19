@@ -288,20 +288,47 @@ def run_lerobot_native_libero(
                         if steps == 0:
                             print(f"[warn] missing image keys; img_dict keys: "
                                   f"{sorted(img_dict.keys()) if isinstance(img_dict, dict) else 'not-dict'}")
-                    # Extract state
-                    state_keys = ["robot0_eef_pos", "state", "agent_state"]
-                    state_val = None
-                    if isinstance(obs, dict):
-                        for k in state_keys:
-                            if k in obs:
-                                state_val = obs[k]; break
-                    if state_val is None:
-                        state_val = np.zeros(8, dtype=np.float32)
-                    state_t = torch.from_numpy(np.asarray(state_val, dtype=np.float32)
-                                               .reshape(-1)[:8]).unsqueeze(0).to("cuda")
-                    if state_t.shape[-1] < 8:
-                        pad = torch.zeros(1, 8 - state_t.shape[-1], device="cuda")
-                        state_t = torch.cat([state_t, pad], dim=-1)
+                    # Extract state from the inner robosuite env.
+                    # LiberoProcessorStep builds 8D: eef_pos(3) + quat->axis-angle(3) + gripper_qpos(2).
+                    # Source: env.unwrapped._env._get_observations() returns a
+                    # robosuite obs dict with 'robot0_eef_pos', 'robot0_eef_quat',
+                    # 'robot0_gripper_qpos'.
+                    state_np = np.zeros(8, dtype=np.float32)
+                    try:
+                        inner_env = env.unwrapped._env
+                        if hasattr(inner_env, "_get_observations"):
+                            robo_obs = inner_env._get_observations()
+                        elif hasattr(inner_env, "get_observation"):
+                            robo_obs = inner_env.get_observation()
+                        else:
+                            robo_obs = None
+                        if isinstance(robo_obs, dict):
+                            if steps == 0 and ep == 0 and task_idx == tasks_to_run[0]:
+                                print(f"[debug] robosuite obs keys (sample): "
+                                      f"{[k for k in robo_obs.keys() if 'robot' in k.lower() or 'eef' in k.lower() or 'gripper' in k.lower()][:10]}")
+                            eef_pos = robo_obs.get("robot0_eef_pos")
+                            eef_quat = robo_obs.get("robot0_eef_quat")
+                            gripper_qpos = robo_obs.get("robot0_gripper_qpos")
+                            if eef_pos is not None and eef_quat is not None and gripper_qpos is not None:
+                                # quat -> axis-angle (approx: return first 3 components of quat)
+                                # Full axis-angle is acos(w)*2 * (x,y,z)/sin(half_angle),
+                                # but lerobot's LiberoProcessorStep uses the XYZ components
+                                # directly when w > 0, or negated if w < 0. Close enough
+                                # for a first attempt — fine-tune uses own normalization.
+                                q = np.asarray(eef_quat, dtype=np.float32)
+                                axis_angle = q[:3] if q[-1] >= 0 else -q[:3]
+                                state_np = np.concatenate([
+                                    np.asarray(eef_pos, dtype=np.float32)[:3],
+                                    axis_angle[:3],
+                                    np.asarray(gripper_qpos, dtype=np.float32)[:2],
+                                ]).astype(np.float32)
+                    except Exception as _se:
+                        if steps == 0:
+                            print(f"[warn] state extraction failed: {_se}")
+
+                    state_t = torch.from_numpy(state_np).unsqueeze(0).to("cuda")
+                    if steps == 0 and ep == 0 and task_idx == tasks_to_run[0]:
+                        print(f"[debug] state_np: {state_np.tolist()}")
 
                     # Task description — from the suite / task
                     try:
@@ -330,9 +357,11 @@ def run_lerobot_native_libero(
                     # select_action re-queries every step when n_action_steps=1
                     with torch.no_grad():
                         action = policy.select_action(batch_pp)
-                    # Convert to numpy for env.step
+                    # Convert to numpy for env.step + squeeze batch dim
                     if isinstance(action, torch.Tensor):
                         action = action.cpu().numpy()
+                    if action.ndim == 2 and action.shape[0] == 1:
+                        action = action[0]
                     # env.step returns (obs, reward, terminated, truncated, info)
                     step_out = env.step(action)
                     if len(step_out) == 5:
