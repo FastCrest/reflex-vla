@@ -138,6 +138,36 @@ def dump_keys(model_id: str = "nvidia/GR00T-N1.6-3B"):
         if "mlp1" in k.lower():
             print(f"  {k}: shape={shape} dtype={dtype}")
 
+    # Future tokens — learnable prefix tokens in the DiT sequence (per lerobot
+    # flow_matching_action_head.py L324-325: sa_embs = cat(state, future, action))
+    print(f"\n[dump] === FUTURE TOKENS / DIT SEQUENCE PREFIX KEYS ===")
+    for k, shape, dtype in all_keys:
+        if any(m in k.lower() for m in ("future_tokens", "future_token",
+                                          "prefix_token", "readout")):
+            print(f"  {k}: shape={shape} dtype={dtype}")
+
+    # action_head.model.* level-3 breakdown (inside DiT)
+    print(f"\n[dump] === ACTION_HEAD.MODEL.* SUB-PREFIXES (level-3) ===")
+    ah_sub: dict[str, int] = defaultdict(int)
+    for k, _, _ in all_keys:
+        if k.startswith("action_head.model."):
+            parts = k.split(".")
+            sub = ".".join(parts[:3]) if len(parts) >= 3 else ".".join(parts)
+            ah_sub[sub] += 1
+    for sub in sorted(ah_sub.keys()):
+        print(f"  {sub:60s}  {ah_sub[sub]:5d}")
+
+    # Sample one key per action_head.model.* sub to see shapes
+    print(f"\n[dump] === ACTION_HEAD.MODEL.* FIRST-KEY PER SUB (shape) ===")
+    seen_sub: set[str] = set()
+    for k, shape, dtype in all_keys:
+        if k.startswith("action_head.model."):
+            parts = k.split(".")
+            sub = ".".join(parts[:3]) if len(parts) >= 3 else ".".join(parts)
+            if sub not in seen_sub:
+                seen_sub.add(sub)
+                print(f"  [{sub}] {k}: {shape} {dtype}")
+
     # Sample key names to sanity-check structure
     print(f"\n[dump] === SAMPLE KEYS (first 5 per top-2 prefix) ===")
     seen: dict[str, int] = defaultdict(int)
