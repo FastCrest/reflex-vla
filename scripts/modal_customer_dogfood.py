@@ -17,9 +17,25 @@ Usage:
     modal run scripts/modal_customer_dogfood.py
 """
 import os
+import subprocess
 import modal
 
 app = modal.App("reflex-customer-dogfood")
+
+
+def _repo_head_sha() -> str:
+    """Return the current git HEAD SHA so the image rebuilds on every commit.
+    Without this, Modal caches the image by `run_commands` string and a
+    `pip install @ git+main` reuses the stale build. Discovered v5 2026-04-19."""
+    try:
+        return subprocess.check_output(
+            ["git", "rev-parse", "HEAD"], cwd=os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        ).decode().strip()[:12]
+    except Exception:
+        return "main"
+
+
+_HEAD = _repo_head_sha()
 
 
 def _hf_secret():
@@ -42,7 +58,10 @@ image = (
     .run_commands(
         # Customers don't get a pre-cloned repo; they install from the public URL.
         # README (post-fix) says: pip install 'reflex-vla[serve,gpu,monolithic] @ git+...'
-        "pip install 'reflex-vla[serve,gpu,monolithic] @ git+https://github.com/rylinjames/reflex-vla'",
+        # SHA-pinning the install URL is what forces Modal to rebuild the image
+        # when we commit — without this, the cached image from the previous dogfood
+        # run is reused and the new fixes aren't actually tested.
+        f"pip install 'reflex-vla[serve,gpu,monolithic] @ git+https://github.com/rylinjames/reflex-vla@{_HEAD}'",
     )
 )
 
