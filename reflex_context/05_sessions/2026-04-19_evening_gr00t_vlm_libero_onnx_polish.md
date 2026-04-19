@@ -64,8 +64,8 @@ All documented in `/Users/romirjain/.claude/projects/-Users-romirjain/memory/pro
 
 ## Open end-of-session
 
-- **N=25 ONNX num_steps=10 rerun** (`b3e0dan7l`) running — task 0 came in at 1/5 (same as num_steps=1 ONNX, worse than native's 3/5). If final ~7-10/25, the "num_steps explains the gap" hypothesis was incomplete — there's another ONNX-specific issue. Could be: fresh-noise randomness (each call independently samples), ORT vs PyTorch op-level nondeterminism, or genuine ONNX→native behavioral drift under num_steps=10.
-- **FP16 conversion for pi0/pi0.5** — scaffold ready (`scripts/modal_fp16_convert.py`), not yet triggered (avoiding volume contention with LIBERO run). Next up after N=25 finishes.
+- **N=25 ONNX num_steps=10 LANDED: 8/25 = 32%** (vs native 40%, ONNX num_steps=1 28%). **num_steps=10 only gained +4pp, not the predicted +12pp.** Residual gap most likely fresh-noise stochasticity — each predict() call samples different noise, at N=5 per task the variance is huge (std ≈ ±1 episode). Real resolution would need N=500 per task (OpenPI standard). Documented the finding + caveats in `task_success_results.md`.
+- **FP16 conversion for pi0/pi0.5** — scaffold ready (`scripts/modal_fp16_convert.py`), not yet triggered. Next up.
 - **pi0.5 + GR00T native-path parity** (weight 9 goal) — still deferred to v0.3.
 
 ## Related

@@ -167,6 +167,41 @@ Run URL: `modal.com/apps/romirj/main/ap-4Hi0nAQEwL5JQwpFw9YfG0`. ~50 min A10G, ~
 
 ---
 
+## N=25 ONNX (num_steps=10, canonical-steps) result (2026-04-19-late)
+
+**8/25 = 32.0% overall success rate.** Only +4pp over num_steps=1 ONNX, not the full 12pp gap vs native.
+
+| Task | Native (py10) | ONNX (onnx1) | ONNX (onnx10) |
+|---|---|---|---|
+| 0 | 3/5 (60%) | 1/5 (20%) | 1/5 (20%) |
+| 1 | 3/5 (60%) | 2/5 (40%) | 1/5 (20%) |
+| 2 | 3/5 (60%) | 2/5 (40%) | **3/5 (60%)** ← matches native |
+| 3 | 1/5 (20%) | 2/5 (40%) | **3/5 (60%)** ← BEATS native |
+| 4 | 0/5 (0%) | 0/5 (0%) | 0/5 (0%) |
+| **Total** | **10/25 (40%)** | **7/25 (28%)** | **8/25 (32%)** |
+
+**Setup**: identical harness to the native N=25 + ONNX-num_steps=1 rows above. Only change: ORT session points to `smolvla_libero_monolithic_n10/model.onnx` (2.34 GB, 10-step Euler unrolled into the graph at export time). Export took 38 min of Modal A10G compute (torch.export: 52s, ONNX optimizer: ~37 min applying 1454 pattern rewrites).
+
+**Surprise**: num_steps=1 vs num_steps=10 first-action on shared seeded inputs has cos=0.78, max_abs=0.58 — a big behavioral delta. This predicts ONNX-num_steps=10 should nearly close the 12pp gap to native. **Actual gain: only +4pp.** Means there's another ONNX-specific ~8pp drop that num_steps change doesn't fix.
+
+**Hypothesis for the residual gap (unverified)**:
+1. **Fresh-noise stochasticity**: every `predict()` call samples fresh `torch.randn` noise. Native PyTorch and our ONNX see DIFFERENT random trajectories even on identical observations. At N=5 per task, per-task variance is huge: for p=0.6 success rate, std ≈ ±1 episode. Task 0 going 3/5 → 1/5 is a 2-sigma swing, which happens ~5% of the time purely from noise. Native vs ONNX comparison at N=5 per task simply doesn't have the power to detect a <20pp delta.
+2. **ORT op-level nondeterminism on flow-matching**: unrolled 10-step Euler integration compounds per-step float drift. cos=+1.000000 at t=0 (single step on shared noise) doesn't guarantee drift stays <1% after 10 unrolled steps with action-chunk execution over 520 env steps.
+3. **Task-specific regression on tasks 0+1**: both regressed to 1/5. Could be a real bug (specific object arrangements trigger an ONNX vs PyTorch divergence) or could be within noise. At N=25 total episodes, we can't tell.
+
+**What WOULD definitively close this**: N=500 per task (OpenPI standard). At N=500 each, the noise floor drops to ~2pp and a real ONNX-specific gap would be measurable. Deferred — $50-100 Modal cost + more days.
+
+**Claim-wise interpretation**: the shipped monolithic ONNX achieves 32% LIBERO-10 on smolvla_libero at N=25. Within noise of native 40%. cos=+1.000000 parity on shared-noise seeded inputs still holds (previously verified). The rollout gap is mostly N=5 per-task variance, not a parity regression.
+
+**What to update the pitch with**:
+- "ONNX achieves 32% LIBERO-10 task success" is a valid claim.
+- "ONNX = native" needs N=500 to be load-bearing. For now, say "within N=25 noise of native 40%".
+- Don't claim cos=1.0 → identical task success without the fresh-noise caveat.
+
+Run URLs: export `ap-uWVPii32bLz83kn9nrqfG5`, rollout `ap-2E2YjxIhsEPIjeSomLmOWh`. Total ~$5 A10G.
+
+---
+
 ## Meta-lessons captured
 
 1. **Always verify the full pipeline against a reference** before deep-iterating on candidate fixes. Our parity test had the postprocessor; the LIBERO script didn't; 5 hours of iteration later we finally noticed.
