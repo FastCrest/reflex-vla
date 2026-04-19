@@ -148,20 +148,25 @@ def run_parity(model_id: str = "nvidia/GR00T-N1.6-3B"):
     # directly — we need to construct the FlowMatchingActionHeadConfig.
     # For a pragmatic reference, we'll load lerobot's GR00TN15 (the full
     # wrapper) via from_pretrained which handles all init internally.
+    # lerobot 0.5.1 exposes GR00TN15 (not GrootPolicy). Verified via
+    # modal_gr00t_lerobot_probe.py. GR00TN15 is the top-level
+    # HF-compatible class with .from_pretrained support.
     try:
-        from lerobot.policies.groot.groot_n1 import GrootPolicy, GR00TN15
-        policy = GrootPolicy.from_pretrained(model_id)
+        from lerobot.policies.groot.groot_n1 import GR00TN15
+        policy = GR00TN15.from_pretrained(model_id)
         policy.eval().to("cuda").to(torch.float32)
-        print(f"[parity] Lerobot GrootPolicy loaded in {time.time()-t0:.1f}s")
-        action_head = policy.model.action_head
+        print(f"[parity] Lerobot GR00TN15 loaded in {time.time()-t0:.1f}s")
+        action_head = policy.action_head
     except Exception as e:
-        print(f"[parity] GrootPolicy load failed ({type(e).__name__}: {e})")
+        import traceback
+        print(f"[parity] GR00TN15 load failed ({type(e).__name__}: {e})")
+        print(traceback.format_exc()[-1200:])
         print(f"[parity] Cannot do full reference parity — reporting Path A only")
         return {
             "status": "partial",
             "path_a_first_action": actions_a[0, 0].cpu().numpy().tolist(),
             "path_a_mean_abs": float(actions_a.abs().mean()),
-            "reason": f"lerobot reference load failed: {type(e).__name__}",
+            "reason": f"lerobot reference load failed: {type(e).__name__}: {str(e)[:200]}",
         }
 
     # Single-step reference forward, mirroring lerobot's get_action body
