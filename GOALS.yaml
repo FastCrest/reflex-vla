@@ -1,29 +1,30 @@
 version: 1
 mission: "Deploy any VLA model to any edge hardware. One command."
 
-# ── CURRENT FOCUS (updated 2026-04-19 post-N=25) ────────────────────
+# ── CURRENT FOCUS (updated 2026-04-19 post-GR00T-Eagle) ──────────────
+# GR00T EAGLE VLM COMPLETE: eagle_vlm.onnx (5.99 GB, cos=+1.000000) +
+# expert_stack_with_vlm.onnx (4.4 GB, cos=+1.000000) + end-to-end
+# chain test (image A vs B → max_abs=0.212 on actions, cos=+0.982 in
+# BOTH PyTorch and ONNX paths). VLM conditioning is LIVE, not zero-
+# stubbed. GR00T is now fully deployable. See measured_numbers.md
+# and reflex_context/01_architecture/gr00t_eagle_vlm_export_plan.md.
+#
 # LIBERO N=25 COMPLETE: 10/25 = 40.0% overall. Per-task: 3/5 on tasks
 # 0-2 (60% each), 1/5 on task 3, 0/5 on task 4. Low end of community
 # 43-51% baseline. Root-cause of prior 0% was missing
 # policy_postprocessor (action unnormalizer); full arc in
 # reflex_context/06_experiments/task_success_results.md.
 #
-# GR00T STEP 2 COMPLETE: state_encoder port + state/vlm_kv plumbing
-# verified via sanity test. VLM signal dominates state 47x (expected).
-# Ready for Steps 3-5 (lerobot parity + Modal ONNX export).
-#
-# Next up: close LIBERO gap to community avg (50%+), complete GR00T
-# VLM chain, verify monolithic ONNX path also achieves 40%.
+# Next up: verify monolithic ONNX path also achieves 40% (confirms
+# cos=1.0 translates to task success on the shipped path), then close
+# LIBERO gap to community avg (50%+) via task 3-4 preprocessor audit.
 current_focus:
-  - id: gr00t-eagle-vlm-steps-3-5
-    why: "Complete Eagle VLM export — lerobot parity test (step 3), Modal ONNX export of 2 ONNXes (step 4), end-to-end chain test (step 5). Turns GR00T from cos=1.0 but zero-stubbed into real deployable. Step 1+2 done; sanity passed."
-    eta: "1-2 days (no hardware dep)"
+  - id: libero-via-monolithic-onnx
+    why: "N=25 native-PyTorch achieves 40%. Monolithic ONNX (customer-facing) needs to match. Confirms 'cos=1.0 translates to task success' on the shipped path. Load-bearing for the whole pitch."
+    eta: "1 day"
   - id: libero-task34-gap-audit
     why: "Tasks 3-4 underperformed at 20%/0% vs tasks 0-2 at 60%. Hypothesis: preprocessor norm or prompt format delta from training. Close to 50%+ beats community 43-51%. Half-day Modal investigation."
     eta: "~0.5 day"
-  - id: libero-via-monolithic-onnx
-    why: "N=25 native-PyTorch achieves 40%. Monolithic ONNX (customer-facing) needs to match. Confirms 'cos=1.0 translates to task success' on the shipped path."
-    eta: "1 day"
 
 goals:
   # ── CRITICAL (weight 10) ──────────────────────────────────────────
