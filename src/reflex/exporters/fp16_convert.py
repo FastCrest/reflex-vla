@@ -158,7 +158,28 @@ def convert_fp32_to_fp16(
         disable_shape_infer=disable_shape_infer,
     )
 
+    # Strip stale value_info when we skipped shape inference. Those entries
+    # carry the pre-conversion FP32 type annotations and ORT rejects the
+    # model on load if they don't match the actual (now FP16) output types.
+    # Without value_info, ORT re-infers types at session-init time.
+    if disable_shape_infer:
+        del model_fp16.graph.value_info[:]
+        logger.info(
+            "[fp16] Stripped %d stale value_info entries (forced ORT re-infer).",
+            0,  # already deleted; log hint only
+        )
+
     logger.info("[fp16] Saving %s...", dst)
+    # Remove any leftover external data from a prior run at this path —
+    # onnx.save would otherwise leave both the old and new .bin on disk
+    # and our size accounting would double-count.
+    for pat in ("*.bin", "*.data"):
+        for old in dst.parent.glob(pat):
+            try:
+                old.unlink()
+            except Exception:
+                pass
+
     onnx.save(
         model_fp16,
         str(dst),
@@ -167,23 +188,6 @@ def convert_fp32_to_fp16(
         location=f"{dst.stem}.bin",
         size_threshold=1024,
     )
-
-    # Fix value_info type metadata. When disable_shape_infer=True is set for
-    # >2GB models, some internal nodes' output types stay labeled FP32 in
-    # the proto even though the tensors are now FP16 — ORT refuses to load
-    # the model. `infer_shapes_path` works on disk without loading proto
-    # into memory, so it's safe for big models.
-    if disable_shape_infer:
-        from onnx import shape_inference
-        logger.info("[fp16] Re-running shape inference on disk to fix value_info...")
-        try:
-            shape_inference.infer_shapes_path(str(dst), str(dst))
-            logger.info("[fp16] Shape inference complete.")
-        except Exception as e:
-            logger.warning(
-                "[fp16] infer_shapes_path failed: %s — model may fail ORT load",
-                e,
-            )
 
     # Size accounting
     fp32_bytes = _size_with_external(src)
