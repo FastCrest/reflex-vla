@@ -33,7 +33,10 @@ def _hf_secret():
 #   docker run --gpus all -it nvcr.io/nvidia/tensorrt:24.10-py3"
 image = (
     modal.Image.from_registry("nvcr.io/nvidia/tensorrt:24.10-py3", add_python="3.12")
-    .apt_install("git", "curl")
+    # clang: lerobot → evdev builds a C extension on install; TRT container
+    # has gcc but NOT clang (evdev's build explicitly invokes clang).
+    # Discovered by dogfood v3 2026-04-19.
+    .apt_install("git", "curl", "clang")
     # Note: a naive customer would do what the README says here — we install
     # from the public git URL. If this fails, that's a real customer failure.
     .run_commands(

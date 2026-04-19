@@ -20,8 +20,10 @@ pip install 'reflex-vla[serve,gpu,monolithic] @ git+https://github.com/rylinjame
 # Note: GPU install requires the FULL cuDNN 9 system library (incl. libcudnn_adv.so.9),
 # not just the pip wheel. Easiest path is NVIDIA's container:
 #   docker run --gpus all -it nvcr.io/nvidia/tensorrt:24.10-py3
-#   (then pip install reflex-vla[serve,gpu] inside)
+#   apt-get install -y clang   # lerobot → evdev needs clang to build
+#   pip install 'reflex-vla[serve,gpu,monolithic] @ git+...'
 # `reflex serve` errors loudly if cuDNN can't load — no silent CPU fallback.
+# Easier alternative: use our published Docker image (see below).
 
 # 2. Export any supported VLA to ONNX (auto-detects model type)
 # SmolVLA fits on Orin Nano 8GB; pi0 (~12GB monolithic) needs Orin 16GB+ or desktop GPU.
