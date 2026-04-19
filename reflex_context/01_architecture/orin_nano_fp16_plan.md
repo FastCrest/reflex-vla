@@ -72,12 +72,13 @@ These are hermetic — no model load, no Modal. The real parity runs happen on M
 ## Rollout
 
 1. ✅ Land conversion scaffold + tests (this doc + files).
-2. ✅ Trigger Modal FP16 conversion for pi0 (~10 min compute). **Result: 12.52 GB → 6.26 GB (-50.0%), 224s on Modal CPU.**
-3. ⚠️ Trigger Modal FP16 parity run for pi0 (~3-5 min). **Blocked on ORT limitation: `onnxconverter_common.float16` doesn't insert Cast nodes at FP32/FP16 boundaries, so the FP16 ONNX fails to load in ORT with "Type parameter (T) of Optype (Mul/MatMul) bound to different types". Same on smolvla_libero_fp16. Deployment path (TensorRT engine build) handles FP16 natively and doesn't need the ORT load.**
-4. ✅ Add measured row to `measured_numbers.md`.
-5. (pending) Update README's "Memory fit" table with FP16 numbers.
-6. (Optional) Repeat 2-4 for pi0.5.
-7. (Blocked on hardware) Jetson-side real-device fit test + TRT engine FP16 build.
+2. ✅ Trigger Modal FP16 conversion for pi0 (~10 min compute). **Result: 12.52 GB → 6.26 GB (-50.0%), 248s on Modal CPU.**
+3. ✅ Cast-insertion post-pass unblocks ORT direct-load (`fix_fp16_dtype_mismatches`). Walks graph, detects mixed FP32/FP16 operands on Mul/MatMul/Add/Sub/Div/Pow/Gemm/Concat/Where, inserts `Cast(to=FP16)` on the FP32 operand. For pi0: 2 Cast nodes inserted. For smolvla_libero: 484 Cast nodes.
+4. ✅ FP16 parity run on smolvla_libero: **cos=+0.999994, max_abs=7.82e-03, PASS** at 1e-2 threshold. First end-to-end FP16 ONNX that ORT loads AND preserves behavior within expected FP16 precision.
+5. ✅ Add measured row to `measured_numbers.md` (two rows: conversion + parity).
+6. (pending) Update README's "Memory fit" table with FP16 numbers + add pi0 Orin Nano as supported.
+7. (Optional) Repeat 2-4 for pi0.5 (13 GB FP32 → est. ~6.6 GB FP16).
+8. (Pending — hardware dependent) Jetson-side real-device fit test + TRT engine FP16 build.
 
 ## Learnings from the conversion pass (2026-04-19)
 
