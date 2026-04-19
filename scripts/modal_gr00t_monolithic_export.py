@@ -25,12 +25,13 @@ app = modal.App("gr00t-monolithic-export")
 
 
 def _hf_secret():
+    """HF token — only needed for gated models. GR00T N1.6 is public,
+    so an empty secret works on fresh workspaces without a pre-registered
+    'huggingface' Modal secret."""
     token = os.environ.get("HF_TOKEN", "")
     if token:
         return modal.Secret.from_dict({"HF_TOKEN": token})
-    # Fall back to the Modal-side named secret. On this account the secret
-    # is "huggingface" (not "hf-token" — that's the pi0/pi05 convention).
-    return modal.Secret.from_name("huggingface")
+    return modal.Secret.from_dict({})
 
 
 # GR00T 6.6GB checkpoint — reuse dedicated volume
