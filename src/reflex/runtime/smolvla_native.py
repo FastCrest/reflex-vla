@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import time
 from pathlib import Path
 from typing import Any
@@ -228,21 +229,52 @@ class SmolVLANativeServer:
 
         start = time.perf_counter()
 
-        # 1) Build raw batch in the schema lerobot's preprocessor expects
+        # 1) Build raw batch in the schema lerobot's preprocessor expects.
+        # 2026-04-19 lerobot-conformance rewrite:
+        #  - Use 2 cameras with keys observation.images.image + image2 (matches
+        #    HuggingFaceVLA/smolvla_libero's canonical config; the community
+        #    lerobot/smolvla_libero config has a rename_map image->camera1,
+        #    image2->camera2 that handles this automatically).
+        #  - Apply 180-degree H+W flip per lerobot's LiberoProcessorStep
+        #    ("HuggingFaceVLA/libero camera orientation convention"). Missing
+        #    this flip alone can drop LIBERO success to near-zero.
+        #  - Do NOT replicate to a phantom 3rd camera — training only saw 2.
+        # Opt out: set REFLEX_LIBERO_LEGACY=1 to restore the camera1/2/3
+        # replicated + unflipped pattern (for comparison / decomposed path).
         images_list = (
             image if isinstance(image, list)
             else [image] if image is not None
             else []
         )
-        # Replicate if fewer than 3 (training used 3 cameras)
-        while len(images_list) < 3:
-            images_list.append(
-                images_list[-1] if images_list else np.zeros((256, 256, 3), np.uint8)
-            )
-        images_list = images_list[:3]
+        legacy_mode = os.environ.get("REFLEX_LIBERO_LEGACY", "0") == "1"
+        if legacy_mode:
+            # Old behavior: replicate to 3 cameras, no flip, camera1/2/3 keys.
+            while len(images_list) < 3:
+                images_list.append(
+                    images_list[-1] if images_list
+                    else np.zeros((256, 256, 3), np.uint8)
+                )
+            images_list = images_list[:3]
+            key_prefix_pairs = [
+                ("observation.images.camera1", 0),
+                ("observation.images.camera2", 1),
+                ("observation.images.camera3", 2),
+            ]
+        else:
+            # New canonical behavior: 2 cameras, flipped H+W, image/image2 keys.
+            if len(images_list) == 0:
+                images_list = [np.zeros((256, 256, 3), np.uint8)] * 2
+            elif len(images_list) == 1:
+                images_list = [images_list[0], images_list[0]]
+            images_list = images_list[:2]
+            key_prefix_pairs = [
+                ("observation.images.image", 0),
+                ("observation.images.image2", 1),
+            ]
 
         batch: dict[str, Any] = {}
-        for i, img in enumerate(images_list, start=1):
+        for key, idx in key_prefix_pairs:
+            img = images_list[idx]
             img_np = np.asarray(img)
             if img_np.dtype != np.uint8:
                 img_np = (img_np * 255).clip(0, 255).astype(np.uint8)
@@ -253,7 +285,10 @@ class SmolVLANativeServer:
                 .div_(255.0)
                 .unsqueeze(0)
             )
-            batch[f"observation.images.camera{i}"] = t
+            # 180° H+W flip for LIBERO camera orientation. Skip in legacy mode.
+            if not legacy_mode:
+                t = torch.flip(t, dims=[2, 3])
+            batch[key] = t
 
         # State: pad/truncate to 8D (LIBERO training dim)
         if state is None:

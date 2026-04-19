@@ -11,7 +11,7 @@ Phase 1 (THIS SCRIPT, REFLEX_NATIVE=1): PyTorch-native baseline.
 Phase 2 (follow-up): extend vla_eval adapter to route to SmolVLAOnnxServer
   (the monolithic cos=+1.000000 path) and compare.
 
-Model: lerobot/smolvla_libero (LIBERO fine-tune; base has 0% — never
+Model: HuggingFaceVLA/smolvla_libero (LIBERO fine-tune; base has 0% — never
 seen the tasks).
 
 Usage:
@@ -140,7 +140,7 @@ def run_libero10():
     export_dir = "/tmp/reflex_libero_export"
     results: dict = {
         "benchmark": "LIBERO-10",
-        "model": "lerobot/smolvla_libero via Reflex ONNX",
+        "model": "HuggingFaceVLA/smolvla_libero via Reflex ONNX",
         "steps": [],
         "task_success": None,
         "per_task": [],
@@ -155,13 +155,13 @@ def run_libero10():
     # Using the official LIBERO fine-tune (not smolvla_base). Base has 0% on
     # LIBERO because it's never seen those tasks; the fine-tune is what gets
     # a real number.
-    print("\n=== Step 1: Export lerobot/smolvla_libero ===")
+    print("\n=== Step 1: Export HuggingFaceVLA/smolvla_libero ===")
     t0 = time.time()
     r = subprocess.run(
         [
             "reflex",
             "export",
-            "lerobot/smolvla_libero",
+            "HuggingFaceVLA/smolvla_libero",
             "--target",
             "desktop",
             "--output",
@@ -344,13 +344,13 @@ def run_libero10():
                 ),
                 "subname": "libero_10",
                 "mode": "sync",
-                # Diagnostic mode (2026-04-19): max_steps=30 cuts each task
-                # from ~2.5 min to ~15s. Enough steps for the first predict()
-                # to fire + for the adapter log's diagnostic to populate.
-                # Bump back to 300 once we're hunting actual task-success.
+                # Real measurement mode (post lerobot-conformance fixes
+                # 2026-04-19): max_steps=300 gives the model time to actually
+                # complete a task. Single task first to cut feedback to ~3 min;
+                # once we see >0% we'll expand to all 10 tasks.
                 "episodes_per_task": 1,
-                "max_steps": 30,
-                "task_order": [0],  # single task — the first LIBERO-10 task
+                "max_steps": 300,
+                "task_order": [0],  # single task — first LIBERO-10 task
                 "params": {
                     "suite": "libero_10",
                     "seed": 7,
