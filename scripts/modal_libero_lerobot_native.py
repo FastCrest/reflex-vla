@@ -1,26 +1,33 @@
-"""LIBERO-10 eval using lerobot's OWN harness (not vla-eval).
+"""LIBERO-10 eval — port of OpenPI's battle-tested rollout.
 
-After 3 vla-eval runs hit 0% with every config permutation (community +
-canonical checkpoint × flip on/off × camera keys camera1/2/3 vs image/image2),
-adapter-vs-raw-policy parity came back bit-exact (cos=+1.000000, max_abs=0).
-This means the wrapping pipeline is clean — the 0% is a vla-eval harness
-integration issue, not a model or adapter bug.
+This is a rewrite (2026-04-19). Prior iterations (9 runs) got 0% because our
+script missed critical pieces from the reference implementation. This version
+is a line-by-line port of:
 
-This script bypasses vla-eval entirely. It uses:
-  - lerobot.envs.libero.LiberoEnv (lerobot's own LIBERO wrapper)
-  - lerobot.processor.env_processor.LiberoProcessorStep (the flip + state
-    concat + normalization step lerobot uses internally)
-  - lerobot.policies.smolvla.SmolVLAPolicy.select_action (the deque-backed
-    per-step re-query the paper uses with n_action_steps=1)
+    openpi/examples/libero/main.py (battle-tested OpenPI LIBERO rollout)
 
-Goal: run the canonical HuggingFaceVLA/smolvla_libero checkpoint against
-libero_10 for N rollouts. If we see non-zero success (ideally ~71% per the
-paper), that CONFIRMS our model + loading is correct and the gap was at
-the vla-eval integration layer.
+cloned at `/Users/romirjain/Desktop/building projects/openpi/`, adapted for
+in-process SmolVLAPolicy (OpenPI uses a WebsocketClient to a separate model
+server; we call policy.select_action directly).
+
+10 fixes applied vs prior version:
+  1. max_steps=520 for libero_10 (was 300 — truncated episodes)
+  2. Use OffScreenRenderEnv directly (was lerobot's gym-wrapped LiberoEnv —
+     obs was nested under 'pixels' with missing state)
+  3. Init state rotation: env.set_init_state(initial_states[episode_idx])
+     per episode (fixes lerobot#2375 trap where every episode hits init_0)
+  4. num_steps_wait=10 zero-action settling at episode start (objects are
+     still falling)
+  5. Correct _quat2axisangle (magnitude-preserving, copied from robosuite)
+  6. Resize images to 224×224 with pad before policy inference
+  7. replan_steps=5 action-plan deque (was: select_action every env step)
+  8. Env resolution 256×256 (was: lerobot's 360×360 default)
+  9. env.seed(7) for reproducibility
+ 10. 180° H+W image flip via numpy slicing (matches OpenPI exactly)
 
 Usage:
-    modal run scripts/modal_libero_lerobot_native.py
-    modal run scripts/modal_libero_lerobot_native.py --num-episodes 10
+    modal run scripts/modal_libero_lerobot_native.py --tasks 0 --num-episodes 1
+    modal run scripts/modal_libero_lerobot_native.py --tasks all --num-episodes 5
 """
 import os
 import subprocess
@@ -49,16 +56,16 @@ def _repo_head_sha() -> str:
 _HEAD = _repo_head_sha()
 
 
-# Same image as the customer dogfood: Python 3.12 + lerobot==0.5.1 + all
-# LIBERO / MuJoCo / robosuite deps. lerobot 0.5.1 requires Python 3.12.
+# Image: Python 3.12 + lerobot 0.5.1 + LIBERO + MuJoCo + robosuite 1.4.1.
+# mujoco==3.3.2 per lerobot#2258 (older versions render different colors).
 image = (
     modal.Image.debian_slim(python_version="3.12")
     .apt_install(
         "git",
         "libgl1-mesa-glx", "libglib2.0-0", "libegl1-mesa", "libglvnd0", "ffmpeg",
         "cmake", "build-essential",
-        "libosmesa6", "libosmesa6-dev",  # software MuJoCo rendering
-        "clang",  # evdev C build in lerobot deps
+        "libosmesa6", "libosmesa6-dev",
+        "clang",
     )
     .pip_install(
         "torch",
@@ -72,7 +79,7 @@ image = (
         "onnx>=1.16",
         "onnxruntime>=1.20",
         "onnxscript>=0.1",
-        "mujoco>=3.0",
+        "mujoco==3.3.2",  # pinned per lerobot#2258
         "robosuite==1.4.1",
         "h5py",
         "bddl==1.0.1",
@@ -86,6 +93,7 @@ image = (
         "gymnasium",
         "lerobot==0.5.1",
         "num2words",
+        "imageio",  # replay video save (optional)
     )
     .run_commands(
         "git clone https://github.com/Lifelong-Robot-Learning/LIBERO.git /opt/LIBERO"
@@ -105,60 +113,59 @@ image = (
 )
 
 
+# ─── Constants matching OpenPI reference ─────────────────────────────
+LIBERO_DUMMY_ACTION = [0.0] * 6 + [-1.0]
+LIBERO_ENV_RESOLUTION = 256  # resolution used to render training data
+
+TASK_SUITE_MAX_STEPS = {
+    "libero_spatial": 220,
+    "libero_object": 280,
+    "libero_goal": 300,
+    "libero_10": 520,
+    "libero_90": 400,
+}
+
+
 @app.function(
     image=image,
     gpu="A10G",
-    timeout=3600,
+    timeout=7200,
     secrets=[_hf_secret()],
 )
-def run_lerobot_native_libero(
+def run_ported_libero(
     model_id: str = "HuggingFaceVLA/smolvla_libero",
     num_episodes: int = 1,
-    max_steps: int = 300,
+    task_suite_name: str = "libero_10",
     task_indices: list[int] | None = None,
+    resize_size: int = 224,
+    replan_steps: int = 5,
+    num_steps_wait: int = 10,
+    seed: int = 7,
 ):
-    """Run LIBERO-10 using lerobot's native env + SmolVLAPolicy.select_action.
+    """Port of openpi/examples/libero/main.py rolled out end-to-end.
 
-    Returns a per-task success summary.
+    Returns per-task success summary. Uses OffScreenRenderEnv directly
+    (NOT lerobot's gym-wrapped LiberoEnv) for OpenPI-style obs access.
     """
+    import collections
+    import math
     import time
     import traceback
     import numpy as np
     import torch
 
-    results = {
-        "model": model_id,
-        "harness": "lerobot-native",
-        "num_episodes_per_task": num_episodes,
-        "max_steps": max_steps,
-        "per_task": [],
-        "total_success": 0,
-        "total_eps": 0,
-        "errors": [],
-    }
-
-    print(f"[lerobot-native] Loading {model_id}...")
+    # ─── Load policy (in-process, not via websocket) ─────────────────
+    print(f"[ported] Loading {model_id}...")
     t0 = time.time()
     from lerobot.policies.smolvla.modeling_smolvla import SmolVLAPolicy
-    policy = SmolVLAPolicy.from_pretrained(model_id)
-    policy.eval().to("cuda").to(torch.float32)
-    # Paper uses n_action_steps=1 — re-query every env step.
-    # predict_action_chunk still produces chunk_size actions; select_action()
-    # only pops 1 per call then triggers a fresh run once queue drains.
-    try:
-        policy.config.n_action_steps = 1
-    except Exception:
-        pass
-    print(f"[lerobot-native] Policy loaded in {time.time()-t0:.1f}s")
-
-    # Load the policy's preprocessor pipeline — this is what tokenizes task
-    # text, normalizes state, and shapes images. select_action expects a
-    # preprocessed batch.
     from lerobot.processor.pipeline import PolicyProcessorPipeline
     from lerobot.processor.converters import (
         batch_to_transition, transition_to_batch,
     )
     from huggingface_hub import snapshot_download
+
+    policy = SmolVLAPolicy.from_pretrained(model_id)
+    policy.eval().to("cuda").to(torch.float32)
     repo_dir = snapshot_download(model_id)
     preprocessor = PolicyProcessorPipeline.from_pretrained(
         pretrained_model_name_or_path=repo_dir,
@@ -167,233 +174,211 @@ def run_lerobot_native_libero(
         to_output=transition_to_batch,
         overrides={"device_processor": {"device": "cuda"}},
     )
-    print(f"[lerobot-native] Preprocessor pipeline loaded")
+    print(f"[ported] Policy + preprocessor loaded in {time.time()-t0:.1f}s")
 
-    # Load lerobot's env + processor
-    print(f"[lerobot-native] Importing lerobot env + processors...")
-    from lerobot.envs.libero import LiberoEnv
-    from lerobot.processor.env_processor import LiberoProcessorStep
+    # ─── Set up LIBERO suite ─────────────────────────────────────────
+    np.random.seed(seed)
+    from libero.libero import benchmark
+    from libero.libero import get_libero_path
+    from libero.libero.envs import OffScreenRenderEnv
+    from pathlib import Path
 
-    # LIBERO suite object (built via libero's benchmark dict)
-    from libero.libero import benchmark as libero_bench
-    suite_name = "libero_10"
-    suite = libero_bench.get_benchmark_dict()[suite_name]()
-    print(f"[lerobot-native] Loaded libero benchmark suite: {suite_name}")
+    benchmark_dict = benchmark.get_benchmark_dict()
+    task_suite = benchmark_dict[task_suite_name]()
+    num_tasks_in_suite = task_suite.n_tasks
+    max_steps = TASK_SUITE_MAX_STEPS[task_suite_name]
+    print(f"[ported] suite={task_suite_name}, num_tasks={num_tasks_in_suite}, "
+          f"max_steps={max_steps}")
 
-    # Build the processor step (handles image flip + state concat)
-    processor = LiberoProcessorStep()
+    # Helper — _quat2axisangle, verbatim from OpenPI (robosuite formula).
+    def _quat2axisangle(quat):
+        if quat[3] > 1.0: quat[3] = 1.0
+        elif quat[3] < -1.0: quat[3] = -1.0
+        den = np.sqrt(1.0 - quat[3] * quat[3])
+        if math.isclose(den, 0.0):
+            return np.zeros(3)
+        return (quat[:3] * 2.0 * math.acos(quat[3])) / den
 
-    tasks_to_run = task_indices if task_indices is not None else list(range(10))
-    print(f"[lerobot-native] Running tasks: {tasks_to_run}")
+    # Helper — resize with pad (matches openpi_client.image_tools.resize_with_pad).
+    # Pads to square first, then resizes. Preserves aspect ratio.
+    def _resize_with_pad(img: np.ndarray, size: int) -> np.ndarray:
+        from PIL import Image
+        h, w = img.shape[:2]
+        # Pad to square with zeros
+        if h > w:
+            pad = (h - w) // 2
+            img = np.pad(img, [(0, 0), (pad, h - w - pad), (0, 0)], mode="constant")
+        elif w > h:
+            pad = (w - h) // 2
+            img = np.pad(img, [(pad, w - h - pad), (0, 0), (0, 0)], mode="constant")
+        # Resize
+        pil = Image.fromarray(img)
+        pil = pil.resize((size, size), Image.BILINEAR)
+        return np.asarray(pil)
 
-    for task_idx in tasks_to_run:
-        task_start = time.time()
-        task_result = {"task_idx": task_idx, "episodes": [], "success": 0, "total": 0}
-        env = LiberoEnv(
-            task_suite=suite,
-            task_id=task_idx,
-            task_suite_name=suite_name,
+    def _build_env(task):
+        task_bddl_file = (
+            Path(get_libero_path("bddl_files")) / task.problem_folder / task.bddl_file
         )
-        print(f"[lerobot-native] LiberoEnv built for task {task_idx}")
+        env_args = {
+            "bddl_file_name": str(task_bddl_file),
+            "camera_heights": LIBERO_ENV_RESOLUTION,
+            "camera_widths": LIBERO_ENV_RESOLUTION,
+        }
+        env = OffScreenRenderEnv(**env_args)
+        env.seed(seed)
+        return env
+
+    def _build_batch(obs, task_description):
+        """Build batch in SmolVLA's expected format, mirroring OpenPI obs."""
+        # Images — 180° flip per LIBERO convention, resize to 224 with pad
+        img = np.ascontiguousarray(obs["agentview_image"][::-1, ::-1])
+        wrist_img = np.ascontiguousarray(obs["robot0_eye_in_hand_image"][::-1, ::-1])
+        img = _resize_with_pad(img, resize_size)
+        wrist_img = _resize_with_pad(wrist_img, resize_size)
+
+        def _to_tensor(arr):
+            t = torch.from_numpy(arr.astype(np.float32) / 255.0)
+            return t.permute(2, 0, 1).unsqueeze(0).to("cuda")
+
+        # State: eef_pos(3) + axis-angle(3) + gripper_qpos(2) = 8D
+        state = np.concatenate([
+            np.asarray(obs["robot0_eef_pos"], dtype=np.float32),
+            _quat2axisangle(np.asarray(obs["robot0_eef_quat"], dtype=np.float32).copy()),
+            np.asarray(obs["robot0_gripper_qpos"], dtype=np.float32),
+        ]).astype(np.float32)
+
+        batch = {
+            "observation.images.image": _to_tensor(img),
+            "observation.images.image2": _to_tensor(wrist_img),
+            "observation.state": torch.from_numpy(state).unsqueeze(0).to("cuda"),
+            "task": [task_description],
+        }
+        return batch
+
+    # ─── Results struct ──────────────────────────────────────────────
+    results = {
+        "model": model_id,
+        "harness": "openpi-port-lerobot-native",
+        "suite": task_suite_name,
+        "num_episodes_per_task": num_episodes,
+        "max_steps": max_steps,
+        "resize_size": resize_size,
+        "replan_steps": replan_steps,
+        "num_steps_wait": num_steps_wait,
+        "per_task": [],
+        "total_success": 0,
+        "total_eps": 0,
+        "errors": [],
+    }
+
+    tasks_to_run = task_indices if task_indices is not None else list(range(num_tasks_in_suite))
+    print(f"[ported] Running tasks: {tasks_to_run}")
+
+    # ─── Main loop: tasks × episodes ─────────────────────────────────
+    for task_idx in tasks_to_run:
+        task = task_suite.get_task(task_idx)
+        task_description = task.language
+        print(f"\n[ported] TASK {task_idx}: {task_description!r}")
+        initial_states = task_suite.get_task_init_states(task_idx)
+        print(f"[ported] {len(initial_states)} init states available")
+
+        env = _build_env(task)
+        task_start = time.time()
+        task_result = {
+            "task_idx": task_idx,
+            "task_description": task_description,
+            "episodes": [],
+            "success": 0,
+            "total": 0,
+        }
+
         for ep in range(num_episodes):
             try:
-                obs, info = env.reset()
-                # Extensive first-step diagnostic so we can finally see the
-                # full LIBERO obs shape + where state lives.
-                if ep == 0 and task_idx == tasks_to_run[0]:
-                    print(f"[debug] reset info: {info}")
-                    print(f"[debug] top obs keys: {sorted(obs.keys()) if isinstance(obs, dict) else type(obs).__name__}")
-                    if isinstance(obs, dict) and "pixels" in obs:
-                        px = obs["pixels"]
-                        if isinstance(px, dict):
-                            print(f"[debug] obs['pixels'] keys: {sorted(px.keys())}")
-                            for k in list(px.keys())[:4]:
-                                v = px[k]
-                                if hasattr(v, "shape"):
-                                    print(f"  obs['pixels'][{k}]: shape={v.shape} dtype={v.dtype}")
-                                else:
-                                    print(f"  obs['pixels'][{k}]: type={type(v).__name__}")
-                        else:
-                            print(f"[debug] obs['pixels'] is not a dict: type={type(px).__name__}")
-                    # Check env for state source
-                    print(f"[debug] env attrs with 'state'/'robot' in name:")
-                    for attr in dir(env):
-                        if "state" in attr.lower() or "robot" in attr.lower() or "proprio" in attr.lower():
-                            print(f"  env.{attr}")
-                    # Try unwrapped — dig for state source
-                    try:
-                        u = env.unwrapped
-                        print(f"[debug] env.unwrapped type: {type(u).__name__}")
-                        for attr in ("_env", "env", "sim", "robots", "get_proprio",
-                                     "get_observation", "get_state"):
-                            if hasattr(u, attr):
-                                val = getattr(u, attr)
-                                print(f"  env.unwrapped.{attr} present: "
-                                      f"{type(val).__name__}")
-                        # Try get_observation method
-                        if hasattr(u, "get_observation"):
-                            try:
-                                raw = u.get_observation()
-                                if isinstance(raw, dict):
-                                    print(f"  env.unwrapped.get_observation() keys: "
-                                          f"{sorted(raw.keys())}")
-                            except Exception as _e:
-                                print(f"  get_observation failed: {_e}")
-                    except Exception as _ue:
-                        print(f"[debug] env.unwrapped access failed: {_ue}")
+                env.reset()
+                # CRITICAL: rotate init state per episode (fixes #2375)
+                init_idx = ep % len(initial_states)
+                obs = env.set_init_state(initial_states[init_idx])
                 policy.reset()
-                steps = 0
+                action_plan = collections.deque()
+                t = 0
                 done = False
-                while not done and steps < max_steps:
-                    # One-shot dump of raw obs schema on first step
-                    if steps == 0 and ep == 0 and task_idx == tasks_to_run[0]:
-                        if isinstance(obs, dict):
-                            print(f"[debug] obs keys: {sorted(obs.keys())}")
-                            for k in sorted(obs.keys()):
-                                v = obs[k]
-                                if hasattr(v, "shape"):
-                                    print(f"  obs[{k}]: shape={v.shape} dtype={v.dtype}")
-                                else:
-                                    print(f"  obs[{k}]: type={type(v).__name__}")
-                        else:
-                            print(f"[debug] obs type: {type(obs).__name__}")
-                    # Build the batch directly in the schema SmolVLAPolicy expects.
-                    # LiberoProcessorStep's output (`{'pixels': ...}`) doesn't
-                    # match prepare_images's expected observation.images.image/image2.
-                    # So bypass it and build manually.
-                    def _mk_img(arr):
-                        a = np.asarray(arr)
-                        if a.dtype != np.uint8:
-                            a = (a * 255).clip(0, 255).astype(np.uint8)
-                        t = torch.from_numpy(a).permute(2, 0, 1).float().div_(255.0).unsqueeze(0)
-                        # 180° flip per LIBERO convention
-                        return torch.flip(t, dims=[2, 3]).to("cuda")
 
-                    # Extract images. LiberoEnv emits obs['pixels'] as a dict
-                    # of cameras (gym PixelObservationWrapper convention).
-                    img_dict = (obs.get("pixels") if isinstance(obs, dict) else None) or {}
-                    if not isinstance(img_dict, dict):
-                        # fallback: obs might already be a flat camera dict
-                        img_dict = obs if isinstance(obs, dict) else {}
-                    img1 = img2 = None
-                    for cand in ("agentview_image", "image", "agent_view",
-                                 "frontview_image"):
-                        if cand in img_dict:
-                            img1 = img_dict[cand]; break
-                    for cand in ("robot0_eye_in_hand_image", "image2",
-                                 "eye_in_hand_image", "wrist_image"):
-                        if cand in img_dict:
-                            img2 = img_dict[cand]; break
-                    if img1 is None or img2 is None:
-                        if steps == 0:
-                            print(f"[warn] missing image keys; img_dict keys: "
-                                  f"{sorted(img_dict.keys()) if isinstance(img_dict, dict) else 'not-dict'}")
-                    # Extract state from the inner robosuite env.
-                    # LiberoProcessorStep builds 8D: eef_pos(3) + quat->axis-angle(3) + gripper_qpos(2).
-                    # Source: env.unwrapped._env._get_observations() returns a
-                    # robosuite obs dict with 'robot0_eef_pos', 'robot0_eef_quat',
-                    # 'robot0_gripper_qpos'.
-                    state_np = np.zeros(8, dtype=np.float32)
+                while t < max_steps + num_steps_wait:
                     try:
-                        inner_env = env.unwrapped._env
-                        if hasattr(inner_env, "_get_observations"):
-                            robo_obs = inner_env._get_observations()
-                        elif hasattr(inner_env, "get_observation"):
-                            robo_obs = inner_env.get_observation()
-                        else:
-                            robo_obs = None
-                        if isinstance(robo_obs, dict):
-                            if steps == 0 and ep == 0 and task_idx == tasks_to_run[0]:
-                                print(f"[debug] robosuite obs keys (sample): "
-                                      f"{[k for k in robo_obs.keys() if 'robot' in k.lower() or 'eef' in k.lower() or 'gripper' in k.lower()][:10]}")
-                            eef_pos = robo_obs.get("robot0_eef_pos")
-                            eef_quat = robo_obs.get("robot0_eef_quat")
-                            gripper_qpos = robo_obs.get("robot0_gripper_qpos")
-                            if eef_pos is not None and eef_quat is not None and gripper_qpos is not None:
-                                # quat -> axis-angle (approx: return first 3 components of quat)
-                                # Full axis-angle is acos(w)*2 * (x,y,z)/sin(half_angle),
-                                # but lerobot's LiberoProcessorStep uses the XYZ components
-                                # directly when w > 0, or negated if w < 0. Close enough
-                                # for a first attempt — fine-tune uses own normalization.
-                                q = np.asarray(eef_quat, dtype=np.float32)
-                                axis_angle = q[:3] if q[-1] >= 0 else -q[:3]
-                                state_np = np.concatenate([
-                                    np.asarray(eef_pos, dtype=np.float32)[:3],
-                                    axis_angle[:3],
-                                    np.asarray(gripper_qpos, dtype=np.float32)[:2],
-                                ]).astype(np.float32)
-                    except Exception as _se:
-                        if steps == 0:
-                            print(f"[warn] state extraction failed: {_se}")
+                        # num_steps_wait: let objects settle
+                        if t < num_steps_wait:
+                            obs, _, done, info = env.step(LIBERO_DUMMY_ACTION)
+                            t += 1
+                            continue
 
-                    state_t = torch.from_numpy(state_np).unsqueeze(0).to("cuda")
-                    if steps == 0 and ep == 0 and task_idx == tasks_to_run[0]:
-                        print(f"[debug] state_np: {state_np.tolist()}")
+                        # Dump obs schema on first real step
+                        if t == num_steps_wait and ep == 0 and task_idx == tasks_to_run[0]:
+                            obs_info = {
+                                k: (obs[k].shape if hasattr(obs[k], "shape") else type(obs[k]).__name__)
+                                for k in sorted(obs.keys())
+                                if any(x in k.lower() for x in ["image", "eef", "gripper", "joint"])
+                            }
+                            print(f"[debug] obs keys: {obs_info}")
 
-                    # Task description — from the suite / task
-                    try:
-                        task_text = suite.get_task(task_idx).language
-                    except Exception:
-                        task_text = f"task_{task_idx}"
-                    if steps == 0:
-                        print(f"[debug] task text: {task_text!r}")
+                        if not action_plan:
+                            batch = _build_batch(obs, task_description)
+                            batch_pp = preprocessor(batch)
+                            batch_pp = {
+                                k: (v.to("cuda") if isinstance(v, torch.Tensor) else v)
+                                for k, v in batch_pp.items()
+                            }
+                            if t == num_steps_wait and ep == 0 and task_idx == tasks_to_run[0]:
+                                print(f"[debug] batch_pp keys: {sorted(batch_pp.keys())}")
+                            with torch.no_grad():
+                                chunk = policy.predict_action_chunk(batch_pp)
+                                # chunk: (1, chunk_size, action_dim) → squeeze batch
+                                chunk_np = chunk[0].cpu().numpy()
+                            # Trim to 7-dim LIBERO action
+                            chunk_np = chunk_np[:, :7]
+                            action_plan.extend(chunk_np[:replan_steps])
+                            if t == num_steps_wait and ep == 0 and task_idx == tasks_to_run[0]:
+                                print(f"[debug] first action: {chunk_np[0]}")
 
-                    batch = {
-                        "observation.images.image": _mk_img(img1) if img1 is not None else torch.zeros(1, 3, 256, 256, device="cuda"),
-                        "observation.images.image2": _mk_img(img2) if img2 is not None else torch.zeros(1, 3, 256, 256, device="cuda"),
-                        "observation.state": state_t,
-                        "task": [task_text],
-                    }
-                    # Route through policy preprocessor (tokenizes task text,
-                    # normalizes state). select_action expects a preprocessed
-                    # batch.
-                    batch_pp = preprocessor(batch)
-                    batch_pp = {
-                        k: (v.to("cuda") if isinstance(v, torch.Tensor) else v)
-                        for k, v in batch_pp.items()
-                    }
-                    if steps == 0 and ep == 0 and task_idx == tasks_to_run[0]:
-                        print(f"[debug] batch_pp keys: {sorted(batch_pp.keys())}")
-                    # select_action re-queries every step when n_action_steps=1
-                    with torch.no_grad():
-                        action = policy.select_action(batch_pp)
-                    # Convert to numpy for env.step + squeeze batch dim
-                    if isinstance(action, torch.Tensor):
-                        action = action.cpu().numpy()
-                    if action.ndim == 2 and action.shape[0] == 1:
-                        action = action[0]
-                    # env.step returns (obs, reward, terminated, truncated, info)
-                    step_out = env.step(action)
-                    if len(step_out) == 5:
-                        obs, reward, terminated, truncated, info = step_out
-                        done = terminated or truncated
-                    else:
-                        obs, reward, done, info = step_out  # older gym api
-                    steps += 1
-                success = bool(info.get("success", False)) if isinstance(info, dict) else False
+                        action = action_plan.popleft()
+                        obs, _, done, info = env.step(action.tolist())
+                        if done:
+                            task_result["success"] += 1
+                            results["total_success"] += 1
+                            break
+                        t += 1
+                    except Exception as e:
+                        err_tb = traceback.format_exc()
+                        print(f"  step error: {e}")
+                        print(err_tb[-800:])
+                        results["errors"].append({
+                            "task": task_idx, "ep": ep,
+                            "error": str(e), "tb": err_tb[-400:],
+                        })
+                        break
+
                 task_result["episodes"].append({
-                    "ep": ep, "steps": steps, "success": success,
+                    "ep": ep, "init_idx": init_idx, "steps": t, "success": done,
                 })
                 task_result["total"] += 1
-                if success:
-                    task_result["success"] += 1
-                    results["total_success"] += 1
                 results["total_eps"] += 1
-                print(f"  task {task_idx} ep {ep}: "
-                      f"{'SUCCESS' if success else 'fail'} at {steps} steps "
-                      f"({time.time()-task_start:.1f}s)")
+                print(f"  ep {ep} (init_idx={init_idx}): "
+                      f"{'SUCCESS' if done else 'fail'} at {t} steps "
+                      f"({time.time()-task_start:.1f}s total)")
             except Exception as e:
-                tb = traceback.format_exc()
-                err = f"task {task_idx} ep {ep}: {type(e).__name__}: {e}"
-                print(f"  ERROR — {err}")
-                print(tb[-1500:])
-                results["errors"].append({"task": task_idx, "ep": ep,
-                                          "error": str(e), "traceback": tb[-500:]})
-                task_result["episodes"].append({"ep": ep, "error": str(e)})
+                err_tb = traceback.format_exc()
+                print(f"  episode error: {e}")
+                print(err_tb[-1000:])
+                results["errors"].append({
+                    "task": task_idx, "ep": ep,
+                    "error": str(e), "tb": err_tb[-400:],
+                })
                 task_result["total"] += 1
                 results["total_eps"] += 1
+
         results["per_task"].append(task_result)
-        print(f"task {task_idx} done: {task_result['success']}/{task_result['total']}")
+        print(f"[ported] task {task_idx} done: "
+              f"{task_result['success']}/{task_result['total']}")
         try:
             env.close()
         except Exception:
@@ -404,7 +389,7 @@ def run_lerobot_native_libero(
         if results["total_eps"] else 0.0
     )
     results["success_rate_pct"] = round(success_rate, 1)
-    print(f"\n====== LIBERO-10 (lerobot-native) ======")
+    print(f"\n====== {task_suite_name} (OpenPI-ported) ======")
     print(f"  Model: {model_id}")
     print(f"  Success: {results['total_success']}/{results['total_eps']} "
           f"= {success_rate:.1f}%")
@@ -412,21 +397,23 @@ def run_lerobot_native_libero(
 
 
 @app.local_entrypoint()
-def main(num_episodes: int = 1, tasks: str = "0"):
+def main(num_episodes: int = 1, tasks: str = "0", suite: str = "libero_10"):
     """
-    --num-episodes N: episodes per task (default 1)
-    --tasks "0"       single task (fast)
-    --tasks "0,1,2"   multiple tasks
-    --tasks "all"     all 10 LIBERO-10 tasks
+    --num-episodes N: episodes per task (OpenPI default: 50)
+    --tasks "0"       single task
+    --tasks "0,1,2"   multiple
+    --tasks "all"     all tasks in suite
+    --suite libero_10|libero_spatial|libero_object|libero_goal|libero_90
     """
     if tasks == "all":
-        task_list = list(range(10))
+        task_list = None  # run all
     else:
         task_list = [int(t) for t in tasks.split(",")]
-    print(f"Running lerobot-native LIBERO-10: tasks={task_list}, "
+    print(f"Running OpenPI-port LIBERO {suite}: tasks={task_list or 'all'}, "
           f"{num_episodes} eps each")
-    r = run_lerobot_native_libero.remote(
+    r = run_ported_libero.remote(
         num_episodes=num_episodes,
+        task_suite_name=suite,
         task_indices=task_list,
     )
     print("\n=== RESULT ===")
@@ -435,4 +422,5 @@ def main(num_episodes: int = 1, tasks: str = "0"):
     print(f"  errors: {len(r.get('errors', []))}")
     for task in r.get("per_task", []):
         print(f"  task {task['task_idx']}: "
-              f"{task['success']}/{task['total']}")
+              f"{task['success']}/{task['total']} — "
+              f"{task['task_description'][:60]}")
