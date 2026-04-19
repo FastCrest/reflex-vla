@@ -100,16 +100,43 @@ def dump_keys(model_id: str = "nvidia/GR00T-N1.6-3B"):
         print(f"  → N1.6 SKIPS the projection. DiT's vlln=LayerNorm(2048) "
               "consumes Qwen2 hidden directly. Port must skip eagle_linear.")
 
-    # Eagle substructure
-    print(f"\n[dump] === EAGLE SUB-PREFIX COUNTS ===")
-    eagle_sub: dict[str, int] = defaultdict(int)
-    for k, _, _ in all_keys:
-        if k.startswith("backbone.eagle"):
+    # Eagle substructure (actual prefix is backbone.model.*, not backbone.eagle.*)
+    print(f"\n[dump] === BACKBONE SUB-PREFIX COUNTS (level-3) ===")
+    backbone_sub: dict[str, tuple] = defaultdict(lambda: (0, 0))
+    for k, shape, _ in all_keys:
+        if k.startswith("backbone."):
             parts = k.split(".")
-            sub = ".".join(parts[:4]) if len(parts) >= 4 else ".".join(parts)
-            eagle_sub[sub] += 1
-    for sub in sorted(eagle_sub.keys()):
-        print(f"  {sub:60s}  {eagle_sub[sub]:5d}")
+            sub = ".".join(parts[:3]) if len(parts) >= 3 else ".".join(parts)
+            n = 1
+            for d in shape:
+                n *= d
+            cnt, params = backbone_sub[sub]
+            backbone_sub[sub] = (cnt + 1, params + n)
+    for sub in sorted(backbone_sub.keys()):
+        cnt, params = backbone_sub[sub]
+        print(f"  {sub:60s}  {cnt:5d}  {params/1e6:8.1f}M")
+
+    # State encoder full dump (found in N1.6, absent from our current export)
+    print(f"\n[dump] === STATE ENCODER KEYS (new in N1.6?) ===")
+    for k, shape, dtype in all_keys:
+        if k.startswith("action_head.state_encoder"):
+            print(f"  {k}: shape={shape} dtype={dtype}")
+
+    # Look for vision-model-likely keys
+    print(f"\n[dump] === POSSIBLE VISION TOWER KEYS (first 5 matches) ===")
+    seen_v = 0
+    for k, shape, dtype in all_keys:
+        if any(m in k.lower() for m in ("vision", "siglip", "vit", "patch_embed", "mlp1")):
+            print(f"  {k}: shape={shape} dtype={dtype}")
+            seen_v += 1
+            if seen_v >= 5:
+                break
+
+    # mlp1 connector (Eagle's 2-layer MLP mapping vision → text hidden)
+    print(f"\n[dump] === MLP1 CONNECTOR KEYS ===")
+    for k, shape, dtype in all_keys:
+        if "mlp1" in k.lower():
+            print(f"  {k}: shape={shape} dtype={dtype}")
 
     # Sample key names to sanity-check structure
     print(f"\n[dump] === SAMPLE KEYS (first 5 per top-2 prefix) ===")
