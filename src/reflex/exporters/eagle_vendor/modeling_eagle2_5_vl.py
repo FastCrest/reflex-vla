@@ -307,12 +307,16 @@ class Eagle25VLForConditionalGeneration(Eagle25VLPreTrainedModel, GenerationMixi
 
     def pixel_shuffle(self, x, scale_factor=0.5):
         n, w, h, c = x.size()
+        # Use .reshape() instead of .view() — the upstream caller's reshape
+        # into (B, h, w, -1) may not produce contiguous memory, making
+        # .view() fail with "view size not compatible with stride". Export
+        # vendor patch 2026-04-19.
         # N, W, H, C --> N, W, H * scale, C // scale
-        x = x.view(n, w, int(h * scale_factor), int(c / scale_factor))
+        x = x.reshape(n, w, int(h * scale_factor), int(c / scale_factor))
         # N, W, H * scale, C // scale --> N, H * scale, W, C // scale
         x = x.permute(0, 2, 1, 3).contiguous()
         # N, H * scale, W, C // scale --> N, H * scale, W * scale, C // (scale ** 2)
-        x = x.view(n, int(h * scale_factor), int(w * scale_factor), int(c / (scale_factor * scale_factor)))
+        x = x.reshape(n, int(h * scale_factor), int(w * scale_factor), int(c / (scale_factor * scale_factor)))
 
         x = x.permute(0, 2, 1, 3).contiguous()
         return x
