@@ -37,10 +37,17 @@ app = modal.App("reflex-libero-lerobot-native")
 
 
 def _hf_secret():
+    """HF token secret — only needed for gated models. Our current
+    model HuggingFaceVLA/smolvla_libero is public, so an empty secret
+    works fine and lets this script run on Modal workspaces without a
+    pre-registered 'huggingface' secret."""
     token = os.environ.get("HF_TOKEN", "")
     if token:
         return modal.Secret.from_dict({"HF_TOKEN": token})
-    return modal.Secret.from_name("huggingface")
+    # No local token → use empty secret. `HuggingFaceVLA/smolvla_libero`
+    # is public so this works. If gated access is needed later, set
+    # HF_TOKEN in env or create a 'huggingface' Modal secret.
+    return modal.Secret.from_dict({})
 
 
 def _repo_head_sha() -> str:
@@ -170,6 +177,7 @@ def run_ported_libero(
     from lerobot.processor.pipeline import PolicyProcessorPipeline
     from lerobot.processor.converters import (
         batch_to_transition, transition_to_batch,
+        policy_action_to_transition, transition_to_policy_action,
     )
     from huggingface_hub import snapshot_download
 
@@ -183,7 +191,17 @@ def run_ported_libero(
         to_output=transition_to_batch,
         overrides={"device_processor": {"device": "cuda"}},
     )
-    print(f"[ported] Policy + preprocessor loaded in {time.time()-t0:.1f}s")
+    # Postprocessor unnormalizes policy output back to env action space.
+    # Without this, predict_action_chunk returns normalized (zero-mean,
+    # unit-variance) values which the env interprets as wildly wrong
+    # deltas. This is what was missing in the 0/3 run on romirj profile.
+    postprocessor = PolicyProcessorPipeline.from_pretrained(
+        pretrained_model_name_or_path=repo_dir,
+        config_filename="policy_postprocessor.json",
+        to_transition=policy_action_to_transition,
+        to_output=transition_to_policy_action,
+    )
+    print(f"[ported] Policy + pre+post processors loaded in {time.time()-t0:.1f}s")
 
     # ─── Set up LIBERO suite ─────────────────────────────────────────
     np.random.seed(seed)
@@ -341,8 +359,17 @@ def run_ported_libero(
                                 print(f"[debug] batch_pp keys: {sorted(batch_pp.keys())}")
                             with torch.no_grad():
                                 chunk = policy.predict_action_chunk(batch_pp)
-                                # chunk: (1, chunk_size, action_dim) → squeeze batch
-                                chunk_np = chunk[0].cpu().numpy()
+                            # Apply postprocessor (unnormalizes back to env
+                            # action space). chunk shape (1, chunk_size, N);
+                            # postprocessor operates on CPU tensors.
+                            post = postprocessor(chunk.detach().cpu())
+                            chunk_np = (
+                                post.detach().cpu().numpy()
+                                if hasattr(post, "detach")
+                                else np.asarray(post)
+                            )
+                            if chunk_np.ndim == 3:
+                                chunk_np = chunk_np[0]  # → (chunk_size, N)
                             # Trim to 7-dim LIBERO action
                             chunk_np = chunk_np[:, :7]
                             action_plan.extend(chunk_np[:replan_steps])
