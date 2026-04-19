@@ -242,8 +242,8 @@ goals:
     weight: 10
 
   - id: gr00t-vlm-conditioning
-    description: "Export Eagle-2-HG VLM backbone as a separate ONNX, chain its KV output into the GR00T DiT per denoise step. Currently the GR00T monolithic ONNX uses a ZERO VLM-KV placeholder — DiT + AdaLN stack is cos=1.0 machine precision, but without real VLM conditioning the exported artifact produces actions that are a pure function of noise. 'GR00T support' in the README is technically true but not deployable for actual multi-modal control. Blocks paid monetization on any customer who wants GR00T (NVIDIA-backed, heaviest marketing tailwind of the four VLAs)."
-    check: "test -f src/reflex/exporters/gr00t_vlm_exporter.py && .venv/bin/python -c 'from reflex.exporters.gr00t_vlm_exporter import export_gr00t_with_vlm' 2>/dev/null"
+    description: "Export Eagle-2-HG VLM backbone as a separate ONNX, chain its KV output into the GR00T DiT per denoise step. DONE 2026-04-19: eagle_vlm.onnx (5.99 GB, cos=+1.000000 parity) + expert_stack_with_vlm.onnx (4.4 GB, cos=+1.000000 parity) + end-to-end chain test (image A vs B sensitivity max_abs=0.212, cos=+0.982 in BOTH PyTorch and ONNX paths — VLM conditioning is LIVE). See measured_numbers.md, reflex_context/01_architecture/gr00t_eagle_vlm_export_plan.md. GR00T is now fully deployable, not zero-stubbed."
+    check: "test -f src/reflex/exporters/eagle_export_stack.py && test -f scripts/modal_gr00t_eagle_vlm_export.py && test -f scripts/modal_gr00t_e2e_chain_test.py && .venv/bin/python -c 'from reflex.exporters.eagle_export_stack import build_eagle_export_stack' 2>/dev/null"
     weight: 9
 
   - id: orin-nano-fp16-fit
