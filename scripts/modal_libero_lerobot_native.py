@@ -184,8 +184,19 @@ def run_lerobot_native_libero(
                 steps = 0
                 done = False
                 while not done and steps < max_steps:
-                    # Apply lerobot's processor step (image flip + state concat)
-                    processed = processor.process_observation(obs)
+                    # Apply lerobot's processor step (image flip + state concat).
+                    # The public API is the Step's __call__; the legacy name
+                    # is _process_observation. Try both.
+                    if hasattr(processor, "process_observation"):
+                        processed = processor.process_observation(obs)
+                    elif hasattr(processor, "_process_observation"):
+                        processed = processor._process_observation(obs)
+                    elif callable(processor):
+                        processed = processor(obs)
+                    else:
+                        raise RuntimeError(
+                            "LiberoProcessorStep has no known entry point"
+                        )
                     # select_action re-queries every step when n_action_steps=1
                     with torch.no_grad():
                         action = policy.select_action(processed)
