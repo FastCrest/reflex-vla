@@ -20,9 +20,11 @@ mission: "Deploy any VLA model to any edge hardware. One command."
 # LIBERO gap to community avg (50%+) via task 3-4 preprocessor audit.
 current_focus:
   - id: libero-via-monolithic-onnx
+    status: done
     why: "N=25 native-PyTorch achieves 40%. Monolithic ONNX (customer-facing) needs to match. Confirms 'cos=1.0 translates to task success' on the shipped path. Load-bearing for the whole pitch."
     eta: "1 day"
   - id: libero-task34-gap-audit
+    status: done
     why: "Tasks 3-4 underperformed at 20%/0% vs tasks 0-2 at 60%. Hypothesis: preprocessor norm or prompt format delta from training. Close to 50%+ beats community 43-51%. Half-day Modal investigation."
     eta: "~0.5 day"
 
@@ -30,11 +32,13 @@ goals:
   # ── CRITICAL (weight 10) ──────────────────────────────────────────
 
   - id: vlm-prefix-encoder
+    status: done
     description: "VLM backbone exports as real SigLIP+SmolLM2 ONNX (not stub) with vlm_kv_dim=960 so /act returns task-conditioned actions"
     check: "test -f src/reflex/exporters/vlm_prefix_exporter.py && grep -q 'AutoModel\\|from_pretrained' src/reflex/exporters/vlm_prefix_exporter.py 2>/dev/null && ! grep -q 'AdaptiveAvgPool2d' src/reflex/exporters/vlm_prefix_exporter.py 2>/dev/null"
     weight: 10
 
   - id: text-embedder-onnx
+    status: done
     description: "reflex export produces text_embedder.onnx (real SmolLM2 embed_tokens) so text encoding uses real embeddings not seeded-random fallback"
     check: "grep -q 'text_embedder' src/reflex/exporters/vlm_prefix_exporter.py 2>/dev/null && grep -q 'embed_tokens' src/reflex/exporters/vlm_prefix_exporter.py 2>/dev/null"
     weight: 10
@@ -52,21 +56,25 @@ goals:
     weight: 9
 
   - id: smolvla-onnx-parity
+    status: done
     description: "End-to-end SmolVLA ONNX export produces cos >= 0.999 vs reference PyTorch predict_action_chunk on shared noise. Jetson customers deploy the ONNX path (not the PyTorch native path), so this is the real parity claim for Jetson-targeted customers. native-path-parity only verifies PyTorch. This goal verifies the ONNX path we actually ship."
     check: "test -f tests/test_smolvla_onnx_parity.py && .venv/bin/python -m pytest tests/test_smolvla_onnx_parity.py -q 2>/dev/null"
     weight: 9
 
   - id: pi0-onnx-parity
+    status: done
     description: "End-to-end pi0 ONNX export produces cos >= 0.999 vs reference PyTorch sample_actions on shared noise. Covers PaliGemma vision + Gemma language backbone + Gemma expert + flow matching loop. src/reflex/exporters/pi0_exporter.py (584 lines) exists but cos-parity has never been verified on shared-noise discipline. The cross-framework moat for pi0 — one of 4 models claimed to work."
     check: "test -f tests/test_pi0_onnx_parity.py && .venv/bin/python -m pytest tests/test_pi0_onnx_parity.py -q 2>/dev/null"
     weight: 9
 
   - id: pi05-onnx-parity
+    status: done
     description: "End-to-end pi0.5 ONNX export produces cos >= 0.999 vs reference PyTorch sample_actions. Requires AdaRMSNorm handling (DecomposedAdaRMSNorm exists in decompose.py). pi0_exporter.py export_pi05 is flagged 'not yet supported' pending this work."
     check: "test -f tests/test_pi05_onnx_parity.py && .venv/bin/python -m pytest tests/test_pi05_onnx_parity.py -q 2>/dev/null"
     weight: 7
 
   - id: gr00t-onnx-parity
+    status: done
     description: "End-to-end NVIDIA GR00T N1.6 ONNX export produces cos >= 0.999 vs reference PyTorch. Requires DiT + AdaLN (2-chunk scale+shift) handling. src/reflex/exporters/gr00t_exporter.py (756 lines) exists; cos-parity never verified under shared-noise discipline."
     check: "test -f tests/test_gr00t_onnx_parity.py && .venv/bin/python -m pytest tests/test_gr00t_onnx_parity.py -q 2>/dev/null"
     weight: 7
@@ -82,11 +90,13 @@ goals:
     weight: 9
 
   - id: ros2-bridge
+    status: done
     description: "reflex serve --ros2 wraps the HTTP endpoint with a thin rclpy action server for native ROS2 integration"
     check: "grep -q 'ros2' src/reflex/runtime/server.py 2>/dev/null || test -f src/reflex/runtime/ros2_bridge.py"
     weight: 8
 
   - id: calibration-metrics
+    status: done
     description: "reflex eval --calibration computes ECE + Brier + NLL on any lerobot dataset — the one non-sim metric with a monotonic link to real-task success (Zollo 2025). Differentiator vs other VLA deployment tools."
     check: "test -f src/reflex/eval/calibration.py && .venv/bin/python -c 'from reflex.eval.calibration import compute_ece, compute_brier, compute_nll' 2>/dev/null"
     weight: 8
@@ -99,6 +109,7 @@ goals:
   # ── MEDIUM-HIGH (weight 7) ────────────────────────────────────────
 
   - id: nan-guard-hardening
+    status: done
     description: "Guard rejects NaN/Inf actions and halts after N consecutive clamps (staleness kill-switch)"
     check: "grep -q 'nan' src/reflex/safety/guard.py 2>/dev/null && grep -q 'staleness\\|stale' src/reflex/safety/guard.py 2>/dev/null"
     weight: 7
@@ -109,16 +120,19 @@ goals:
     weight: 7
 
   - id: api-key-auth
+    status: done
     description: "reflex serve --api-key enables X-Reflex-Key header auth that rejects unauthenticated requests with 401"
     check: "grep -q 'api.key\\|api_key\\|X-Reflex-Key' src/reflex/runtime/server.py 2>/dev/null"
     weight: 7
 
   - id: action-chunk-buffering
+    status: done
     description: "reflex serve --replan-hz N --execute-hz M handles async replan-while-execute with a ring buffer. Real production pattern (Physical Intelligence uses it) — robots execute at 100Hz, VLAs plan at 20Hz."
     check: "grep -q 'replan_hz\\|sliding_window\\|action_buffer' src/reflex/runtime/server.py 2>/dev/null"
     weight: 7
 
   - id: docker-image-distribution
+    status: done
     description: "ghcr.io/rylinjames/reflex:<version>-<target> images published per release. Zero-install path: docker pull + docker run. Images for orin-nano, orin, thor, desktop. MVP-adoption tablestakes — first-hour experience goes from 4 hours of install to 60 seconds."
     check: "test -f .github/workflows/docker-publish.yml"
     weight: 7
@@ -126,6 +140,7 @@ goals:
   # ── MEDIUM (weight 5-6) ───────────────────────────────────────────
 
   - id: latency-histograms
+    status: done
     description: "/act response includes latency_p50, latency_p95, latency_p99, jitter_ms fields"
     check: "grep -q 'latency_p95\\|p95' src/reflex/runtime/server.py 2>/dev/null"
     weight: 6
@@ -136,11 +151,13 @@ goals:
     weight: 6
 
   - id: export-verification-report
+    status: done
     description: "Every reflex export auto-writes <export_dir>/VERIFICATION.md with per-stage cos, L2, max_abs, ONNX sizes, opset, target-hardware compat, provenance hash. 'Ship a receipt, not just a binary.'"
     check: "grep -q 'VERIFICATION.md\\|verification_report' src/reflex/exporters/*.py 2>/dev/null"
     weight: 6
 
   - id: quickstart-docs
+    status: done
     description: "README front page delivers 3-command quickstart (install / export / serve) that works on a fresh box in under 5 minutes. Plus docs/getting_started.md covering the 5 most common customer scenarios. MVP-adoption tablestakes."
     check: "test -f docs/getting_started.md && grep -q 'Quickstart' README.md && grep -c '```bash' docs/getting_started.md | grep -q '[3-9]'"
     weight: 6
@@ -151,6 +168,7 @@ goals:
     weight: 5
 
   - id: determinism-version-hash
+    status: done
     description: "Every /act response includes model_hash, config_hash, reflex_version for reproducible debugging"
     check: "grep -q 'model_hash' src/reflex/runtime/server.py 2>/dev/null"
     weight: 5
@@ -163,6 +181,7 @@ goals:
     weight: 4
 
   - id: openvla-exporter
+    status: done
     description: "reflex export auto-detects and exports OpenVLA (7.5B, tokenized head) beyond the current stub"
     check: "grep -c 'def export_openvla' src/reflex/exporters/openvla_exporter.py 2>/dev/null | grep -q '[1-9]'"
     weight: 4
@@ -175,46 +194,55 @@ goals:
   # ── LAUNCH VERIFICATION (durable pre-launch + regression gates) ───
 
   - id: fresh-install-verified
+    status: done
     description: "`pip install 'reflex-vla[serve,gpu] @ git+https://...'` succeeds on a fresh python:3.12-slim container and `reflex --help` runs. Catches dep resolution breakage, broken editable installs, missing files in the wheel. Regression-check every release."
     check: "test -f tests/test_fresh_install.py && .venv/bin/python -m pytest tests/test_fresh_install.py -q 2>/dev/null"
     weight: 8
 
   - id: cuda-runtime-verified
+    status: done
     description: "Monolithic ONNX (SmolVLA + pi0) loads and runs on CUDAExecutionProvider with cos=1.0 vs CPUExecutionProvider on the same seeded inputs. Confirms the GPU serve path works end-to-end, not just the export. Without this, `reflex serve --device cuda` is a claim not a fact."
     check: "test -f tests/test_cuda_runtime_parity.py && .venv/bin/python -m pytest tests/test_cuda_runtime_parity.py -q 2>/dev/null"
     weight: 8
 
   - id: num-steps-quality-gate
+    status: done
     description: "Characterize action-quality drift between num_steps=1 (what monolithic ONNX currently bakes in) vs num_steps=10 (PyTorch default) on seeded fixtures. Write the cos/L2/max_abs drift to reflex_context/measured_numbers.md. If drift is significant, ship with warning + pin num_steps in model-card README. Without this, customers compare to their PyTorch num_steps=10 baseline and see regression they can't explain."
     check: "test -f tests/test_num_steps_quality.py && .venv/bin/python -m pytest tests/test_num_steps_quality.py -q 2>/dev/null"
     weight: 8
 
   - id: docker-image-smoke-test
+    status: done
     description: "Published `ghcr.io/rylinjames/reflex-vla:<version>` image runs end-to-end: `docker run --gpus all -v <export>:/exports -p 8000:8000 <image>` followed by `curl POST /act` returns a valid action chunk. Catches Dockerfile breakage, missing deps, entrypoint bugs — every release, before customers hit it."
     check: "test -f tests/test_docker_image_smoke.py && .venv/bin/python -m pytest tests/test_docker_image_smoke.py -q 2>/dev/null"
     weight: 7
 
   - id: ros2-bridge-live
+    status: done
     description: "`reflex ros2-serve` actually runs under real (not mocked) rclpy in a ros:humble container — subscribes to pub'd image/state/task topics, emits Float32MultiArray action chunks within the configured rate. Required because the current 8 tests use a FakeNode shim that will not catch rclpy API drift."
     check: "test -f tests/test_ros2_bridge_live.py && .venv/bin/python -m pytest tests/test_ros2_bridge_live.py -q 2>/dev/null"
     weight: 7
 
   - id: cli-export-end-to-end
+    status: done
     description: "`reflex export <hf_id> --output <dir>` from the installed CLI produces a working export directory: reflex_config.json + model.onnx (or the legal decomposed-stage files) + VERIFICATION.md. Verifies the customer's first command from the README actually works — not just the Modal export scripts. If the CLI still routes to an abandoned decomposed exporter, this catches it before launch."
     check: "test -f tests/test_cli_export_end_to_end.py && .venv/bin/python -m pytest tests/test_cli_export_end_to_end.py -q 2>/dev/null"
     weight: 9
 
   - id: serve-act-roundtrip
+    status: done
     description: "`reflex serve <export_dir>` boots and an HTTP POST /act with image+instruction+state returns a valid action chunk (shape [chunk, action_dim], all-finite). Closes the loop between export + server code — we have ONNX parity but have never actually served a request end-to-end through the FastAPI layer."
     check: "test -f tests/test_serve_act_roundtrip.py && .venv/bin/python -m pytest tests/test_serve_act_roundtrip.py -q 2>/dev/null"
     weight: 9
 
   - id: runtime-num-steps-10
+    status: done
     description: "Reflex runtime (`ReflexServer` / `Pi0OnnxServer` / `SmolVLANativeServer`) correctly serves the num_steps=10 monolithic ONNX. Current servers were written assuming num_steps=1; need to verify the num_steps=10 artifact's I/O contract (inputs, action chunk shape, noise handling) is compatible or the runtime is updated."
     check: "test -f tests/test_runtime_num_steps_10.py && .venv/bin/python -m pytest tests/test_runtime_num_steps_10.py -q 2>/dev/null"
     weight: 8
 
   - id: guard-trip-integration
+    status: done
     description: "ActionGuard kill-switch integration: when max_consecutive_clamps is hit in a live `reflex serve`, POST /act returns the `guard_tripped` error (not actions), and POST /guard/reset clears the state. Verifies the full path from unit-tested guard → live HTTP behavior."
     check: "test -f tests/test_guard_trip_integration.py && .venv/bin/python -m pytest tests/test_guard_trip_integration.py -q 2>/dev/null"
     weight: 7
@@ -222,6 +250,7 @@ goals:
   # ── REGRESSION GATE (runs after every /evolve cycle) ──────────────
 
   - id: native-path-parity
+    status: done
     description: "Native export path (lerobot SmolVLAPolicy + DecomposedRMSNorm) matches PyTorch reference to cos=1.0000 end-to-end. The one load-bearing number for reflex's deployment-parity claim."
     check: "test -f src/reflex/runtime/smolvla_native.py && test -f scripts/local_full_diff.py && REFLEX_NATIVE=1 .venv/bin/python scripts/local_full_diff.py 2>&1 | grep -q 'cos=+1.000'"
     weight: 10
@@ -233,6 +262,7 @@ goals:
   # actually works for your robot on your hardware" story.
 
   - id: task-success-benchmark
+    status: done
     description: "COMPLETED 2026-04-19 (N=25 result). Published task-success on LIBERO-10 via HuggingFaceVLA/smolvla_libero: 10/25 = 40.0% (per-task 60%/60%/60%/20%/0% on tasks 0-4). Statistically in line with lerobot community's 43-51% baseline. First statistically meaningful LIBERO number for reflex. See reflex_context/06_experiments/task_success_results.md. The N=25 rollout was on the NATIVE PyTorch path (REFLEX_NATIVE=1); verifying the monolithic ONNX path hits same is a separate goal (libero-via-monolithic-onnx)."
     check: "test -f reflex_context/06_experiments/task_success_results.md && grep -q '10/25\\|40.0' reflex_context/06_experiments/task_success_results.md 2>/dev/null"
     weight: 10
@@ -243,16 +273,19 @@ goals:
     weight: 10
 
   - id: gr00t-vlm-conditioning
+    status: done
     description: "Export Eagle-2-HG VLM backbone as a separate ONNX, chain its KV output into the GR00T DiT per denoise step. DONE 2026-04-19: eagle_vlm.onnx (5.99 GB, cos=+1.000000 parity) + expert_stack_with_vlm.onnx (4.4 GB, cos=+1.000000 parity) + end-to-end chain test (image A vs B sensitivity max_abs=0.212, cos=+0.982 in BOTH PyTorch and ONNX paths — VLM conditioning is LIVE). See measured_numbers.md, reflex_context/01_architecture/gr00t_eagle_vlm_export_plan.md. GR00T is now fully deployable, not zero-stubbed."
     check: "test -f src/reflex/exporters/eagle_export_stack.py && test -f scripts/modal_gr00t_eagle_vlm_export.py && test -f scripts/modal_gr00t_e2e_chain_test.py && .venv/bin/python -c 'from reflex.exporters.eagle_export_stack import build_eagle_export_stack' 2>/dev/null"
     weight: 9
 
   - id: orin-nano-fp16-fit
+    status: done
     description: "pi0 (12.5 GB) and pi0.5 (13 GB) monolithic ONNX don't fit on Orin Nano 8GB at FP32. FP16 engine rebuild + Orin Nano fit validation so pi0/pi0.5 actually run on the entry-level Jetson. Without this, the 'pick up a $499 Orin Nano and deploy pi0' story in our pitch is literally false for the most common VLA model. SmolVLA (1.6GB) and GR00T (4.4GB) already fit; this is a pi-family-specific fit problem. Requires TRT FP16 engine build with validated parity loss < 1% vs FP32."
     check: "test -f tests/test_orin_nano_fp16_fit.py && .venv/bin/python -m pytest tests/test_orin_nano_fp16_fit.py -q 2>/dev/null"
     weight: 8
 
   - id: docker-arm64-jetson
+    status: done
     description: "Native arm64 Docker image (`ghcr.io/rylinjames/reflex-vla:<version>-arm64` or multi-arch manifest) that runs on Jetson hardware. Current published image is x86_64 only; Jetson users must build from source. The 'zero-install Docker run' quickstart in our README works on x86 GPUs (A10G, RTX) but is a dead-end for the primary customer target. Requires: QEMU emulation or native arm64 build in GitHub Actions + Jetson-specific CUDA/cuDNN pinning + smoke test on real Jetson hardware."
     check: "test -f .github/workflows/docker-publish-arm64.yml && grep -q 'arm64\\|linux/arm64' .github/workflows/docker-publish-arm64.yml 2>/dev/null"
     weight: 7
@@ -269,21 +302,25 @@ goals:
   # reflex_context/06_experiments/task_success_results.md.
 
   - id: vla-eval-adapter-vlm-on
+    status: done
     description: "SUPERSEDED 2026-04-19. Hypothesis was that adapter 'vlm=off' silenced language conditioning → 0% LIBERO. Proved WRONG — vlm=off was a false log signal (checked _vlm_loaded on the wrong server class). Native mode always has VLM via lerobot's SmolVLAPolicy internals. Actual root cause was missing policy_postprocessor (action unnormalizer). Keep this entry for historical tracking; do not work on it."
     check: "true  # superseded; always passes"
     weight: 0
 
   - id: libero-via-monolithic-onnx
+    status: done
     description: "Extend vla_eval.py to route through SmolVLAOnnxServer (monolithic cos=+1.000000 path) when a flag is set (e.g. REFLEX_MONOLITHIC=1). Currently LIBERO uses REFLEX_NATIVE=1 (PyTorch). The monolithic ONNX is what customers actually ship, so the task-success number on the monolithic path is the load-bearing customer claim. Depends on vla-eval-adapter-vlm-on producing a non-zero baseline first — otherwise we can't distinguish adapter-plumbing bugs from monolithic-path bugs."
     check: "grep -q 'SmolVLAOnnxServer\\|REFLEX_MONOLITHIC' src/reflex/runtime/adapters/vla_eval.py 2>/dev/null"
     weight: 9
 
   - id: libero-preprocessing-audit
+    status: done
     description: "SOLVED 2026-04-19 — the listed candidate (c) 'action chunk unnormalization' turned out to be THE bug. Fix: route policy.predict_action_chunk output through policy_postprocessor.json before env.step (scripts/modal_libero_lerobot_native.py). All other candidates (state norm, camera keying, chunk cadence) proved fine. Result: 1/3 success on task 0 at N=3, statistically consistent with community 43-51% baseline."
     check: "grep -q 'postprocessor' scripts/modal_libero_lerobot_native.py 2>/dev/null"
     weight: 0
 
   - id: libero-adapter-lerobot-conformance
+    status: done
     description: "COMPLETED 2026-04-19 — 10 iterations of port work culminated in 40% success rate via OpenPI-ported harness. Root cause of prior 0% was NOT the 5 research-identified deltas (vla-eval, VLM, flip, camera keys, n_action_steps) — it was the missing policy_postprocessor (action unnormalizer). Final harness: HuggingFaceVLA/smolvla_libero + OffScreenRenderEnv + max_steps=520 + init-state rotation + num_steps_wait=10 + policy_postprocessor.json + 180° flip + correct _quat2axisangle + replan_steps=5. Reproducer: modal run scripts/modal_libero_lerobot_native.py."
     check: "grep -q 'postprocessor' scripts/modal_libero_lerobot_native.py 2>/dev/null"
     weight: 0
@@ -295,16 +332,19 @@ goals:
   # 2026-04-19 session log. These goals track the remaining work.
 
   - id: gr00t-eagle-vlm-steps-3-5
+    status: done
     description: "COMPLETE the Eagle VLM ONNX export for GR00T. Step 1 (vendor Eagle source, strip peft, force eager attn) DONE. Step 2 (port state_encoder + extend GR00TFullStack to accept state + vlm_kv inputs) DONE, sanity-verified 2026-04-19 — state conditioning LIVE (0.06 ratio), VLM conditioning LIVE (2.85 ratio). Remaining: Step 3 lerobot parity test (compare our GR00TFullStack with real vl_embs from lerobot's backbone vs lerobot's full reference); Step 4 Modal export of eagle_vlm.onnx + expert_stack_with_vlm.onnx; Step 5 end-to-end chain test (flip image → actions should change). Full plan at reflex_context/01_architecture/gr00t_eagle_vlm_export_plan.md."
     check: "test -f scripts/modal_gr00t_vlm_parity.py && grep -q 'eagle_vlm' scripts/modal_gr00t_monolithic_export.py 2>/dev/null"
     weight: 9
 
   - id: libero-task34-gap-audit
+    status: done
     description: "Tasks 3 (bowl-in-drawer) + 4 (mug-on-plate) scored 20% and 0% at N=5 each, vs tasks 0-2 at 60% each. 2026-04-19 N=25 result. Likely candidates: (a) normalizer stats delta from training (lerobot's LiberoProcessorStep uses specific gripper_qpos range we may mismatch), (b) prompt format — training used specific language templates, (c) replan_steps=5 may be too aggressive for long-horizon tasks (task 3 is drawer, task 4 is bimanual-like). Deliverable: modal script that dumps per-dim action stats for tasks 3-4 vs tasks 0-2; identify delta; implement fix. Target: raise tasks 3-4 to 20-40% each."
     check: "test -f reflex_context/06_experiments/libero_task34_audit.md 2>/dev/null"
     weight: 8
 
   - id: libero-via-monolithic-onnx-task-success
+    status: done
     description: "N=25 = 40% success was on REFLEX_NATIVE=1 (lerobot PyTorch path). Need to verify monolithic ONNX path (what customers ship) achieves same success rate. Extend modal_libero_lerobot_native.py to route through SmolVLAOnnxServer + monolithic ONNX export; re-run N=25 or subset. If task-success drops significantly, something diverges between the cos=1.0-verified ONNX and the lerobot native path at sequence-level behavior."
     check: "grep -q 'SmolVLAOnnxServer\\|monolithic.*task.*success' scripts/modal_libero_lerobot_native.py 2>/dev/null"
     weight: 9
