@@ -321,17 +321,23 @@ def _build_pi_family_adapters(
     """
     import torch
     from lerobot.policies.pi0.modeling_pi0 import make_att_2d_masks
+    from lerobot.utils.constants import (
+        OBS_LANGUAGE_ATTENTION_MASK,
+        OBS_LANGUAGE_TOKENS,
+    )
 
     def _build_prefix_cache(policy, obs_kwargs):
         """Compute (past_kv, prefix_pad_masks, state) from a lerobot batch.
 
         obs_kwargs is the batch dict minus 'action' — the flattened
-        observation/language/state that LeRobotDataset produces.
+        observation/language/state that LeRobotDataset produces AFTER
+        lerobot's preprocessor pipeline has run (so language is already
+        tokenized into OBS_LANGUAGE_TOKENS + OBS_LANGUAGE_ATTENTION_MASK).
         """
         m = policy.model
         images, img_masks = policy._preprocess_images(obs_kwargs)
-        lang_tokens = obs_kwargs["observation.language_tokens"]
-        lang_masks = obs_kwargs["observation.language_attention_mask"]
+        lang_tokens = obs_kwargs[OBS_LANGUAGE_TOKENS]
+        lang_masks = obs_kwargs[OBS_LANGUAGE_ATTENTION_MASK]
         state = policy.prepare_state(obs_kwargs)
 
         prefix_embs, prefix_pad_masks, prefix_att_masks = m.embed_prefix(

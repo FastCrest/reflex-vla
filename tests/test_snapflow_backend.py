@@ -270,8 +270,8 @@ class TestBuildVelocityAdapters:
         t = torch.rand(1)
         obs = {
             "observation.state": torch.zeros(1, 7),
-            "observation.language_tokens": torch.zeros(1, 8, dtype=torch.long),
-            "observation.language_attention_mask": torch.ones(1, 8, dtype=torch.long),
+            "observation.language.tokens": torch.zeros(1, 8, dtype=torch.long),
+            "observation.language.attention_mask": torch.ones(1, 8, dtype=torch.long),
             "observation.images.front": torch.zeros(1, 3, 224, 224),
         }
 
@@ -326,8 +326,8 @@ class TestBuildVelocityAdapters:
         student_mock.model.paligemma_with_expert.forward.return_value = (None, [("fake_cache",)])
 
         obs = {
-            "observation.language_tokens": torch.zeros(1, 8, dtype=torch.long),
-            "observation.language_attention_mask": torch.ones(1, 8, dtype=torch.long),
+            "observation.language.tokens": torch.zeros(1, 8, dtype=torch.long),
+            "observation.language.attention_mask": torch.ones(1, 8, dtype=torch.long),
         }
 
         from unittest.mock import patch as _patch
