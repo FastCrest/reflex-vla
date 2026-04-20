@@ -256,8 +256,179 @@ def _resolve_snapflow_class() -> type:
             suffix_out = suffix_out.to(dtype=self.action_out_proj.weight.dtype)
             return self.action_out_proj(suffix_out)
 
+        @torch.no_grad()
+        def sample_actions_1step(
+            self,
+            images,
+            img_masks,
+            lang_tokens,
+            lang_masks,
+            state,
+            noise=None,
+        ):
+            """SnapFlow 1-NFE inference: single denoise_step at target_time=1.
+
+            After SnapFlow distillation, the ``target_time_embed_mlp`` has
+            learned to produce the 2-step-Euler shortcut velocity at
+            target_time=1. This method runs exactly one denoise_step with
+            time=1 (pure noise) and target_time=1 (request one-shot
+            generation), then does one Euler step (dt=-1) to produce the
+            action chunk.
+
+            Analog of PI0Pytorch.sample_actions with num_steps=1 + the
+            target_time kwarg threaded through. Parent prefix-cache setup
+            is replicated verbatim; only the integration loop shrinks.
+            """
+            bsize = state.shape[0]
+            device = state.device
+
+            if noise is None:
+                actions_shape = (
+                    bsize, self.config.chunk_size, self.config.max_action_dim,
+                )
+                noise = self.sample_noise(actions_shape, device)
+
+            prefix_embs, prefix_pad_masks, prefix_att_masks = self.embed_prefix(
+                images, img_masks, lang_tokens, lang_masks,
+            )
+            prefix_att_2d = make_att_2d_masks(prefix_pad_masks, prefix_att_masks)
+            prefix_position_ids = torch.cumsum(prefix_pad_masks, dim=1) - 1
+            prefix_att_2d_masks_4d = self._prepare_attention_masks_4d(prefix_att_2d)
+            self.paligemma_with_expert.paligemma.model.language_model.config._attn_implementation = "eager"  # noqa: SLF001
+
+            _, past_key_values = self.paligemma_with_expert.forward(
+                attention_mask=prefix_att_2d_masks_4d,
+                position_ids=prefix_position_ids,
+                past_key_values=None,
+                inputs_embeds=[prefix_embs, None],
+                use_cache=True,
+            )
+
+            time = torch.ones(bsize, dtype=torch.float32, device=device)
+            # Single denoise call at time=1, target_time=1. Inputs match the
+            # dtype of action_in_proj so embed_suffix doesn't hit a cast.
+            action_dtype = self.action_in_proj.weight.dtype
+            x_t = noise.to(action_dtype)
+            v_t = self.denoise_step(
+                state=state,
+                prefix_pad_masks=prefix_pad_masks,
+                past_key_values=past_key_values,
+                x_t=x_t,
+                timestep=time,
+                target_time=time,
+            )
+            # Euler step: x_{k+1} = x_k + dt * v_t, with dt=-1 and x_k=noise.
+            # v_t from a well-distilled student approximates noise - action.
+            return (x_t - v_t).to(noise.dtype)
+
     _SNAPFLOW_CLASS = SnapFlowPI0Pytorch
     return SnapFlowPI0Pytorch
 
 
-__all__ = ["enable_snapflow"]
+def load_snapflow_student(checkpoint_path: Any) -> Any:
+    """Load a SnapFlow-distilled student checkpoint from a reflex-saved dir.
+
+    The backend's ``_save_student_checkpoint`` dumps the student via
+    ``PI05Policy.save_pretrained(...)``, which includes the
+    ``target_time_embed_mlp.*`` keys. Plain ``PI05Policy.from_pretrained``
+    may reject those keys (strict=True default).
+
+    This loader:
+
+      1. Reads ``model.safetensors``, splits off the
+         ``model.target_time_embed_mlp.*`` keys into a separate dict.
+      2. Writes the base-only safetensors (+ copies sibling config files)
+         into a temp dir, loads via ``PI05Policy.from_pretrained``
+         (or PI0 if that's the teacher family).
+      3. Calls ``enable_snapflow(policy.model)`` to attach the target_time
+         machinery + an empty target_time_embed_mlp submodule.
+      4. Loads the extracted MLP weights into that submodule.
+
+    Callers then typically do ``.eval().to(device).to(dtype)`` as usual,
+    and invoke ``policy.model.sample_actions_1step(...)`` for 1-NFE
+    inference or ``policy.model.sample_actions(...)`` for multi-step.
+    """
+    import shutil
+    import tempfile
+    from pathlib import Path
+
+    from safetensors.torch import load_file, save_file
+
+    path = Path(checkpoint_path)
+    if not path.exists():
+        raise FileNotFoundError(
+            f"SnapFlow student checkpoint not found at {path}. Expected a "
+            f"reflex-saved pretrained_model/ dir with model.safetensors + "
+            f"config.json."
+        )
+
+    sf_path = path / "model.safetensors"
+    if not sf_path.exists():
+        raise FileNotFoundError(f"missing model.safetensors in {path}")
+
+    full_state = load_file(str(sf_path))
+    mlp_prefix = "model.target_time_embed_mlp."
+    base_state = {k: v for k, v in full_state.items() if not k.startswith(mlp_prefix)}
+    mlp_state = {
+        k[len(mlp_prefix):]: v
+        for k, v in full_state.items() if k.startswith(mlp_prefix)
+    }
+
+    policy_cls = _dispatch_policy_class(path)
+
+    with tempfile.TemporaryDirectory(prefix="snapflow_load_") as td:
+        td_path = Path(td)
+        for f in path.iterdir():
+            if f.is_file() and f.name != "model.safetensors":
+                shutil.copy(f, td_path / f.name)
+        save_file(base_state, str(td_path / "model.safetensors"))
+        policy = policy_cls.from_pretrained(str(td_path))
+
+    enable_snapflow(policy.model)
+
+    if not mlp_state:
+        logger.warning(
+            "[load_snapflow_student] no target_time_embed_mlp weights in %s; "
+            "loaded as zero-init student (behaves like teacher at target_time=1). "
+            "If this is a trained distill output, the checkpoint is corrupt.",
+            path,
+        )
+        return policy
+
+    missing, unexpected = policy.model.target_time_embed_mlp.load_state_dict(
+        mlp_state, strict=True,
+    )
+    if missing:
+        logger.warning("[load_snapflow_student] missing mlp keys: %s", missing)
+    if unexpected:
+        logger.warning("[load_snapflow_student] unexpected mlp keys: %s", unexpected)
+    logger.info("[load_snapflow_student] loaded student from %s", path)
+    return policy
+
+
+def _dispatch_policy_class(checkpoint_path: Any):
+    """Pick PI0Policy vs PI05Policy from checkpoint config."""
+    import json
+    from pathlib import Path
+
+    cfg_path = Path(checkpoint_path) / "config.json"
+    if cfg_path.exists():
+        with cfg_path.open() as f:
+            cfg = json.load(f)
+        ptype = cfg.get("type") or cfg.get("_reflex_distill_teacher_type", "")
+        if ptype == "pi05":
+            from lerobot.policies.pi05.modeling_pi05 import PI05Policy
+            return PI05Policy
+        if ptype == "pi0":
+            from lerobot.policies.pi0.modeling_pi0 import PI0Policy
+            return PI0Policy
+    # Fallback: try pi0.5 first (current distill target), then pi0.
+    try:
+        from lerobot.policies.pi05.modeling_pi05 import PI05Policy
+        return PI05Policy
+    except ImportError:
+        from lerobot.policies.pi0.modeling_pi0 import PI0Policy
+        return PI0Policy
+
+
+__all__ = ["enable_snapflow", "load_snapflow_student"]

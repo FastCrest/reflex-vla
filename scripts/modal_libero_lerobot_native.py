@@ -112,6 +112,13 @@ image = (
     )
     .add_local_file("scripts/patch_libero.py", "/root/patch_libero.py", copy=True)
     .run_commands("python /root/patch_libero.py")
+    # Pull reflex-vla so `reflex.distill.snapflow_pi0_model` is importable
+    # when --snapflow-student is used. Uses the github-token secret to
+    # clone the private repo. Cheap — this only pulls the Python package.
+    .run_commands(
+        f'pip install "reflex-vla @ git+https://x-access-token:$GITHUB_TOKEN@github.com/rylinjames/reflex-vla@{_HEAD}"',
+        secrets=[modal.Secret.from_name("github-token")],
+    )
     .env({
         "MUJOCO_GL": "osmesa",
         "PYOPENGL_PLATFORM": "osmesa",
@@ -137,11 +144,19 @@ TASK_SUITE_MAX_STEPS = {
 }
 
 
+_onnx_output_volume = modal.Volume.from_name("pi0-onnx-outputs", create_if_missing=True)
+_hf_cache_volume = modal.Volume.from_name("pi0-hf-cache", create_if_missing=True)
+
+
 @app.function(
     image=image,
     gpu="A10G",
     timeout=7200,
     secrets=[_hf_secret()],
+    volumes={
+        "/onnx_out": _onnx_output_volume,
+        "/root/.cache/huggingface": _hf_cache_volume,
+    },
 )
 def run_ported_libero(
     model_id: str = "HuggingFaceVLA/smolvla_libero",
@@ -152,6 +167,8 @@ def run_ported_libero(
     replan_steps: int = 5,
     num_steps_wait: int = 10,
     seed: int = 7,
+    snapflow_student: str = "",
+    preprocessor_ref: str = "",
 ):
     """Port of openpi/examples/libero/main.py rolled out end-to-end.
 
@@ -184,25 +201,41 @@ def run_ported_libero(
     )
     from huggingface_hub import snapshot_download
 
-    # Dispatch by model_id prefix. pi05 before pi0 (longer prefix first).
-    model_key = model_id.split("/")[-1].lower()
-    if model_key.startswith("pi05") or model_key.startswith("pi0.5") or "pi05" in model_key:
-        from lerobot.policies.pi05.modeling_pi05 import PI05Policy
-        policy_cls = PI05Policy
-        detected_type = "pi05"
-    elif model_key.startswith("pi0") or "pi0" in model_key:
-        from lerobot.policies.pi0.modeling_pi0 import PI0Policy
-        policy_cls = PI0Policy
-        detected_type = "pi0"
+    # Dispatch:
+    # - snapflow_student path set → load via load_snapflow_student (SnapFlow
+    #   distilled checkpoint with target_time_embed_mlp weights) and use the
+    #   1-NFE inference path.
+    # - else, dispatch normal lerobot policy class by model_id prefix.
+    use_1nfe = bool(snapflow_student)
+    if use_1nfe:
+        from reflex.distill.snapflow_pi0_model import load_snapflow_student
+        print(f"[ported] Loading SnapFlow student from {snapflow_student} (1-NFE inference)")
+        policy = load_snapflow_student(snapflow_student)
+        detected_type = "snapflow_student"
+        # Preprocessor comes from the teacher checkpoint (student has the
+        # same config + processor files copied over by save_pretrained, but
+        # caller can override via --preprocessor-ref if the student's dir
+        # is missing them).
+        repo_dir = preprocessor_ref or snapflow_student
     else:
-        from lerobot.policies.smolvla.modeling_smolvla import SmolVLAPolicy
-        policy_cls = SmolVLAPolicy
-        detected_type = "smolvla"
-    print(f"[ported] Detected policy type: {detected_type} ({policy_cls.__name__})")
+        model_key = model_id.split("/")[-1].lower()
+        if model_key.startswith("pi05") or model_key.startswith("pi0.5") or "pi05" in model_key:
+            from lerobot.policies.pi05.modeling_pi05 import PI05Policy
+            policy_cls = PI05Policy
+            detected_type = "pi05"
+        elif model_key.startswith("pi0") or "pi0" in model_key:
+            from lerobot.policies.pi0.modeling_pi0 import PI0Policy
+            policy_cls = PI0Policy
+            detected_type = "pi0"
+        else:
+            from lerobot.policies.smolvla.modeling_smolvla import SmolVLAPolicy
+            policy_cls = SmolVLAPolicy
+            detected_type = "smolvla"
+        print(f"[ported] Detected policy type: {detected_type} ({policy_cls.__name__})")
+        policy = policy_cls.from_pretrained(model_id)
+        repo_dir = snapshot_download(model_id)
 
-    policy = policy_cls.from_pretrained(model_id)
     policy.eval().to("cuda").to(torch.float32)
-    repo_dir = snapshot_download(model_id)
     preprocessor = PolicyProcessorPipeline.from_pretrained(
         pretrained_model_name_or_path=repo_dir,
         config_filename="policy_preprocessor.json",
@@ -377,7 +410,22 @@ def run_ported_libero(
                             if t == num_steps_wait and ep == 0 and task_idx == tasks_to_run[0]:
                                 print(f"[debug] batch_pp keys: {sorted(batch_pp.keys())}")
                             with torch.no_grad():
-                                chunk = policy.predict_action_chunk(batch_pp)
+                                if use_1nfe:
+                                    # SnapFlow 1-NFE path: single denoise_step
+                                    # at target_time=1 via the subclass override.
+                                    from lerobot.utils.constants import (
+                                        OBS_LANGUAGE_ATTENTION_MASK,
+                                        OBS_LANGUAGE_TOKENS,
+                                    )
+                                    images, img_masks = policy._preprocess_images(batch_pp)
+                                    lang_tokens = batch_pp[OBS_LANGUAGE_TOKENS]
+                                    lang_masks = batch_pp[OBS_LANGUAGE_ATTENTION_MASK]
+                                    state_t = policy.prepare_state(batch_pp)
+                                    chunk = policy.model.sample_actions_1step(
+                                        images, img_masks, lang_tokens, lang_masks, state_t,
+                                    )
+                                else:
+                                    chunk = policy.predict_action_chunk(batch_pp)
                             # Apply postprocessor (unnormalizes back to env
                             # action space). chunk shape (1, chunk_size, N);
                             # postprocessor operates on CPU tensors.
@@ -463,29 +511,42 @@ def main(
     tasks: str = "0",
     suite: str = "libero_10",
     model_id: str = "HuggingFaceVLA/smolvla_libero",
+    snapflow_student: str = "",
+    preprocessor_ref: str = "",
 ):
     """
-    --num-episodes N    episodes per task (OpenPI default: 50)
-    --tasks "0"         single task
-    --tasks "0,1,2"     multiple
-    --tasks "all"       all tasks in suite
-    --suite             libero_10|libero_spatial|libero_object|libero_goal|libero_90
-    --model-id          HF repo id. Auto-dispatches policy class by name:
-                          lerobot/pi05_libero_finetuned → PI05Policy
-                          lerobot/pi0_base              → PI0Policy (vanilla)
-                          HuggingFaceVLA/smolvla_libero → SmolVLAPolicy
+    --num-episodes N          episodes per task (OpenPI default: 50)
+    --tasks "0"               single task
+    --tasks "0,1,2"           multiple
+    --tasks "all"             all tasks in suite
+    --suite                   libero_10|libero_spatial|libero_object|libero_goal|libero_90
+    --model-id                HF repo id (when not using snapflow student).
+    --snapflow-student PATH   Path to a SnapFlow distilled student checkpoint
+                              dir on the Modal volume (e.g.
+                              /onnx_out/distill_v031_pi05_libero/training/
+                              checkpoints/00010000/pretrained_model). When
+                              set, loads via load_snapflow_student and uses
+                              1-NFE inference (sample_actions_1step).
+    --preprocessor-ref HFID   Fallback HF id for preprocessor pipeline when
+                              the student checkpoint dir is missing the
+                              policy_preprocessor.json (defaults to the
+                              student dir itself — reflex saves processors
+                              alongside safetensors).
     """
     if tasks == "all":
         task_list = None  # run all
     else:
         task_list = [int(t) for t in tasks.split(",")]
-    print(f"Running OpenPI-port LIBERO {suite}: model={model_id} tasks={task_list or 'all'}, "
+    which = f"snapflow-student={snapflow_student}" if snapflow_student else f"model={model_id}"
+    print(f"Running OpenPI-port LIBERO {suite}: {which} tasks={task_list or 'all'}, "
           f"{num_episodes} eps each")
     r = run_ported_libero.remote(
         model_id=model_id,
         num_episodes=num_episodes,
         task_suite_name=suite,
         task_indices=task_list,
+        snapflow_student=snapflow_student,
+        preprocessor_ref=preprocessor_ref,
     )
     print("\n=== RESULT ===")
     print(f"  model: {r.get('model')}")
