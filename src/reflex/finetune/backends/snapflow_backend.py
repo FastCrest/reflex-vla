@@ -506,24 +506,33 @@ def _detach_kv_cache(past_kv):
     `copy.deepcopy(past_kv)` (as done by lerobot's denoise_step at line
     918 of modeling_pi0.py) doesn't fail on graph-attached tensors.
 
-    past_kv format varies across transformers versions:
-      - list[tuple[Tensor, Tensor]] — classic tuple cache
-      - list[DynamicCache] — newer HF cache objects with .key_cache/.value_cache
-      - list[list[...]] — nested pi0 paligemma_with_expert shape
-
-    We walk it generically and detach whatever looks like a tensor.
+    past_kv format varies across transformers versions and can nest
+    list / tuple / dict / custom-object. Walk recursively and detach
+    any tensor found, regardless of container type.
     """
     import torch
     def _walk(obj):
         if isinstance(obj, torch.Tensor):
             return obj.detach()
-        if isinstance(obj, (list, tuple)):
-            mapped = [_walk(x) for x in obj]
-            return type(obj)(mapped) if not isinstance(obj, list) else mapped
-        # For HF DynamicCache-like objects, try to detach known slots.
-        for attr in ("key_cache", "value_cache"):
+        if isinstance(obj, list):
+            return [_walk(x) for x in obj]
+        if isinstance(obj, tuple):
+            return tuple(_walk(x) for x in obj)
+        if isinstance(obj, dict):
+            return {k: _walk(v) for k, v in obj.items()}
+        # For HF DynamicCache-like objects, walk the known slots AND any
+        # mutable __dict__ attrs that might hold tensors.
+        for attr in ("key_cache", "value_cache", "key_states", "value_states"):
             if hasattr(obj, attr):
-                setattr(obj, attr, _walk(getattr(obj, attr)))
+                try:
+                    setattr(obj, attr, _walk(getattr(obj, attr)))
+                except AttributeError:
+                    pass  # read-only property on some cache classes
+        # Last resort: walk __dict__ if present.
+        if hasattr(obj, "__dict__"):
+            for k, v in list(obj.__dict__.items()):
+                if isinstance(v, (torch.Tensor, list, tuple, dict)):
+                    obj.__dict__[k] = _walk(v)
         return obj
     return _walk(past_kv)
 
