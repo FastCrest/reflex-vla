@@ -35,10 +35,13 @@ app = modal.App("reflex-distill")
 
 
 def _hf_secret():
+    """Prefer a local HF_TOKEN env var; fall back to the persistent
+    Modal secret named 'huggingface' (same pattern as
+    modal_customer_dogfood.py / modal_smolvla_libero_parity.py)."""
     token = os.environ.get("HF_TOKEN", "")
     if token:
         return modal.Secret.from_dict({"HF_TOKEN": token})
-    return modal.Secret.from_dict({})
+    return modal.Secret.from_name("huggingface")
 
 
 def _repo_head_sha() -> str:

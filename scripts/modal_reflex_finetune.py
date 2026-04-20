@@ -33,10 +33,12 @@ app = modal.App("reflex-finetune")
 
 
 def _hf_secret():
+    """Prefer a local HF_TOKEN env var; fall back to the persistent
+    Modal secret named 'huggingface'."""
     token = os.environ.get("HF_TOKEN", "")
     if token:
         return modal.Secret.from_dict({"HF_TOKEN": token})
-    return modal.Secret.from_dict({})
+    return modal.Secret.from_name("huggingface")
 
 
 def _repo_head_sha() -> str:
