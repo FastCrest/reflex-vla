@@ -45,16 +45,31 @@ def _hf_secret():
 
 
 def _repo_head_sha() -> str:
+    """Return the git HEAD SHA. When running via modal, falls back to 'main'
+    on the server side (the Modal build container has no .git)."""
     try:
-        return subprocess.check_output(
+        cwd = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        sha = subprocess.check_output(
             ["git", "rev-parse", "HEAD"],
-            cwd=os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+            cwd=cwd,
+            stderr=subprocess.DEVNULL,
         ).decode().strip()[:12]
+        return sha
     except Exception:
         return "main"
 
 
+def _build_bust_marker() -> str:
+    """Unique string used in the image's run_commands to bust Modal's
+    layer cache on every local `modal run`. Without this, when the
+    HEAD-SHA fetch falls back to the literal string 'main', Modal reuses
+    a stale pip-install layer even when the repo has new commits."""
+    import time
+    return str(int(time.time()))
+
+
 _HEAD = _repo_head_sha()
+_BUILD_BUST = _build_bust_marker()
 
 hf_cache = modal.Volume.from_name("pi0-hf-cache", create_if_missing=True)
 onnx_output = modal.Volume.from_name("pi0-onnx-outputs", create_if_missing=True)
@@ -91,6 +106,9 @@ image = (
         "rich",
     )
     .run_commands(
+        # Local timestamp in an echo cache-busts Modal's layer cache even
+        # when _HEAD falls back to 'main' on the build server.
+        f'echo "build_bust={_BUILD_BUST}"',
         f'pip install "reflex-vla[monolithic] @ git+https://x-access-token:$GITHUB_TOKEN@github.com/rylinjames/reflex-vla@{_HEAD}"',
         secrets=[modal.Secret.from_name("github-token")],
     )

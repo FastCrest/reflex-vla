@@ -169,6 +169,7 @@ class SnapFlowBackend:
             import torch as _torch
             target_dtype = _torch.bfloat16 if dtype == "bf16" else _torch.float32
             max_action_dim = getattr(teacher.config, "max_action_dim", None)
+            chunk_size = getattr(teacher.config, "chunk_size", None)
             for step, batch in enumerate(loader, start=1):
                 # Apply lerobot's preprocessor pipeline: rename_map (image keys),
                 # tokenizer (task -> language_tokens), device transfer, normalize.
@@ -178,6 +179,7 @@ class SnapFlowBackend:
                     device=device,
                     compute_dtype=target_dtype,
                     max_action_dim=max_action_dim,
+                    chunk_size=chunk_size,
                 )
 
                 opt.zero_grad()
@@ -547,6 +549,7 @@ def _prepare_batch(
     device: str,
     compute_dtype=None,
     max_action_dim: int | None = None,
+    chunk_size: int | None = None,
 ) -> tuple:
     """Unpack a preprocessed LeRobotDataset batch into (action, noise, t, obs_kwargs).
 
@@ -571,6 +574,13 @@ def _prepare_batch(
         action = action.to(device)
     if compute_dtype is not None and action.dtype != compute_dtype:
         action = action.to(compute_dtype)
+    # pi0/pi05 training expects (B, chunk_size, action_dim) — if the dataset
+    # returns (B, action_dim) single-step (no delta_timestamps configured),
+    # tile across chunk_size so the flow-matching chain has a time axis.
+    # This is a smoke-test shortcut; production distill should configure
+    # delta_timestamps on LeRobotDataset for a real action chunk.
+    if chunk_size is not None and action.ndim == 2:
+        action = action.unsqueeze(1).expand(-1, chunk_size, -1).contiguous()
     if max_action_dim is not None and action.shape[-1] < max_action_dim:
         action = F.pad(action, (0, max_action_dim - action.shape[-1]))
     batch_size = action.shape[0]
