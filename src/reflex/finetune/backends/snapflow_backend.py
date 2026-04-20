@@ -105,9 +105,14 @@ class SnapFlowBackend:
         teacher = loaded.policy
         policy_type = loaded.policy_type
 
-        logger.info("[snapflow] building student (deepcopy of teacher)")
-        student = copy.deepcopy(teacher)
-        # Student is TRAINABLE — teacher_loader froze it, undo that for the copy.
+        logger.info("[snapflow] building student (fresh load from teacher dir)")
+        # deepcopy(teacher) breaks on pi0 because some internal tensors are
+        # non-leaf (see pytorch#103001). Load a second PI0Policy from the
+        # same checkpoint instead — costs one extra safetensors parse but
+        # produces a clean trainable copy.
+        from reflex.distill.teacher_loader import load_teacher as _load
+        student_loaded = _load(cfg.teacher_export, device=device, dtype=dtype)
+        student = student_loaded.policy
         for p in student.parameters():
             p.requires_grad = True
         student.train()
