@@ -32,8 +32,12 @@ def _validate_config(cfg: FinetuneConfig) -> list[str]:
     before we spin up any training process.
     """
     errs: list[str] = []
-    if not cfg.base:
+    is_distill = getattr(cfg, "phase", "train") == "distill"
+    # base is inferred from teacher_export in distill mode.
+    if not cfg.base and not is_distill:
         errs.append("base is required (e.g. lerobot/smolvla_base)")
+    if is_distill and not cfg.teacher_export:
+        errs.append("teacher_export is required for phase='distill'")
     if not cfg.dataset:
         errs.append("dataset is required (e.g. lerobot/libero)")
     if cfg.num_steps <= 0:
@@ -44,11 +48,15 @@ def _validate_config(cfg: FinetuneConfig) -> list[str]:
         errs.append(
             f"mode must be one of lora|lora-cross-embodiment|full; got {cfg.mode!r}"
         )
-    if cfg.mode != "lora":
-        # v0.3 only supports LoRA. Flag explicitly instead of silently
-        # proceeding (the subprocess would fail later with a confusing error).
+    # v0.3 fine-tune supports LoRA only. Distill requires 'full' (SnapFlow
+    # trains a full-weight student copy — no PEFT adapter step).
+    if not is_distill and cfg.mode != "lora":
         errs.append(
-            f"v0.3 only supports --mode lora; {cfg.mode!r} lands in v0.5+"
+            f"v0.3 fine-tune only supports --mode lora; {cfg.mode!r} lands in v0.5+"
+        )
+    if is_distill and cfg.mode != "full":
+        errs.append(
+            f"phase='distill' requires --mode full (SnapFlow trains full weights); got {cfg.mode!r}"
         )
     if cfg.backend != "lerobot":
         errs.append(
@@ -316,7 +324,7 @@ def _auto_export(checkpoint: Path, cfg: FinetuneConfig) -> tuple[Path | None, st
         return None, f"export_monolithic raised: {type(exc).__name__}: {exc}"
 
 
-def run_finetune(cfg: FinetuneConfig) -> FinetuneResult:
+def run_finetune(cfg: FinetuneConfig, *, hooks=None) -> FinetuneResult:
     """Run a fine-tune end-to-end: train → auto-export → receipt.
 
     v0.3 flow: SmolVLA LoRA via subprocess-lerobot-train, then reflex
@@ -324,6 +332,12 @@ def run_finetune(cfg: FinetuneConfig) -> FinetuneResult:
     pre-flight — those land in v0.5. A run_finetune() call that reaches
     cfg.num_steps + exports ONNX is a SUCCESS; anything else is an
     error with actionable details in FinetuneResult.error.
+
+    Args:
+      cfg: FinetuneConfig.
+      hooks: optional HookRegistry. If None, an empty registry is
+        created. The distill CLI attaches `libero_drop_gate` here
+        before calling run_finetune.
     """
     cfg.output.mkdir(parents=True, exist_ok=True)
     training_log = cfg.output / "training_log.jsonl"
@@ -374,7 +388,7 @@ def run_finetune(cfg: FinetuneConfig) -> FinetuneResult:
 
     ctx = TrainerContext(
         config=cfg,
-        hooks=HookRegistry(),
+        hooks=hooks if hooks is not None else HookRegistry(),
         training_log_path=training_log,
         teacher_path=Path(cfg.teacher_export) if cfg.teacher_export else None,
     )

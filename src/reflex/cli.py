@@ -1118,75 +1118,9 @@ def models():
     console.print("\n[dim]Usage:[/dim] [cyan]reflex export <hf_id>[/cyan] — auto-detects model type.")
 
 
-@app.command()
-def distill(
-    teacher: str = typer.Argument(help="Path to exported teacher model directory"),
-    output: str = typer.Option("./distilled_student", help="Output directory for distilled student"),
-    recipe: str = typer.Option("dmpo", help="Distillation recipe: dmpo (default), pi_flow"),
-    dataset: str = typer.Option("libero_10", help="Training dataset: libero_10, libero_long, droid, open_x"),
-    episodes: int = typer.Option(1000, help="Training episodes"),
-    steps: int = typer.Option(10000, help="Training steps"),
-    batch_size: int = typer.Option(32, help="Batch size"),
-    lr: float = typer.Option(1e-4, help="Learning rate"),
-    device: str = typer.Option("cuda", help="Device: cuda or cpu"),
-    verbose: bool = typer.Option(False, help="Verbose logging"),
-):
-    """Distill a flow-matching VLA into a one-step student (5-10x faster).
-
-    DMPO recipe (arXiv 2601.20701) eliminates the teacher dependency and targets
-    1000+ Hz on consumer GPUs. pi-Flow (arXiv 2510.14974) is also available but
-    DMPO is the preferred default.
-
-    v0.2 status: command scaffold. Full training loop ships in v0.2.1 —
-    track progress at GOALS.yaml: `distill-dmpo`.
-    """
-    _setup_logging(verbose)
-    from reflex.distill import get_recipe
-
-    console.print(f"\n[bold]Reflex Distill[/bold]")
-    console.print(f"  Recipe:  [cyan]{recipe}[/cyan]")
-    console.print(f"  Teacher: {teacher}")
-    console.print(f"  Student: {output}")
-    console.print(f"  Dataset: {dataset}")
-    console.print(f"  Steps:   {steps}")
-    console.print(f"  Device:  {device}\n")
-
-    try:
-        trainer_cls = get_recipe(recipe)
-    except ValueError as exc:
-        console.print(f"[red]{exc}[/red]")
-        raise typer.Exit(2)
-
-    # Load config for the chosen recipe
-    if recipe == "dmpo":
-        from reflex.distill.dmpo import DMPOConfig
-        config = DMPOConfig(
-            teacher_export_dir=teacher,
-            student_output_dir=output,
-            dataset=dataset,
-            num_episodes=episodes,
-            num_training_steps=steps,
-            batch_size=batch_size,
-            learning_rate=lr,
-            device=device,
-        )
-    else:
-        from reflex.distill.pi_flow import PiFlowConfig
-        config = PiFlowConfig(
-            teacher_export_dir=teacher,
-            student_output_dir=output,
-            dataset=dataset,
-        )
-
-    trainer = trainer_cls(config)
-    try:
-        result = trainer.train()
-        console.print("\n[bold green]Distillation complete[/bold green]")
-        for key, val in result.items():
-            console.print(f"  {key}: {val}")
-    except NotImplementedError as exc:
-        console.print(f"[yellow]{exc}[/yellow]")
-        raise typer.Exit(1)
+# `reflex distill` registered below via `app.command(name="distill")` on the
+# finetune package. Kept out of this file so test collection doesn't pull
+# lerobot + torch + SnapFlow deps just to load the CLI module.
 
 
 @app.command(hidden=True)
@@ -1437,13 +1371,19 @@ def doctor():
     )
 
 
-# Register `reflex finetune` subcommand. Lazy-import protects users who
-# don't have training deps installed — they only break if they run the
-# finetune command itself.
+# Register `reflex finetune` + `reflex distill` subcommands. Lazy-import
+# protects users who don't have training deps installed — they only break
+# if they run the commands themselves.
 try:
     from reflex.finetune.cli import finetune_command
     app.command(name="finetune")(finetune_command)
 except Exception as _finetune_import_exc:  # pragma: no cover - defensive
+    pass
+
+try:
+    from reflex.finetune.cli_distill import distill_command
+    app.command(name="distill")(distill_command)
+except Exception as _distill_import_exc:  # pragma: no cover - defensive
     pass
 
 

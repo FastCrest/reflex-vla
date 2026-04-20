@@ -50,16 +50,19 @@ class TestConfigValidation:
         )
         assert any("num_steps" in e for e in _validate_config(cfg))
 
-    def test_full_mode_rejected_in_v03(self, tmp_path):
-        """v0.3 supports LoRA only. --mode full should fail cleanly."""
+    def test_full_mode_rejected_in_v03_for_finetune(self, tmp_path):
+        """v0.3 fine-tune supports LoRA only. --mode full is reserved for
+        distill (SnapFlow trains full weights). Fine-tune with mode=full
+        should fail cleanly."""
         cfg = FinetuneConfig(
             base="lerobot/smolvla_base",
             dataset="lerobot/libero",
             output=tmp_path,
             mode="full",
+            phase="train",  # explicit — distill allows full, train does not
         )
         errs = _validate_config(cfg)
-        assert any("v0.3 only supports --mode lora" in e for e in errs)
+        assert any("v0.3 fine-tune only supports --mode lora" in e for e in errs)
 
     def test_non_lerobot_backend_rejected(self, tmp_path):
         cfg = FinetuneConfig(

@@ -1,0 +1,230 @@
+"""Run `reflex distill` on Modal — GPU-accelerated, no local GPU needed.
+
+SnapFlow 1-step self-distillation for flow-matching VLAs. v0.3 supports
+pi0 + pi0.5 teachers. Student is a copy of the teacher with a zero-init
+target_time embedding; the consistency loss trains it to produce a
+1-NFE velocity when target_time=1.
+
+Teacher must be a reflex-exported dir on the shared volume (same path
+as `reflex export` produces). Either run `modal_reflex_finetune.py`
+first to create the teacher, or upload your own checkpoint.
+
+Usage:
+    modal run scripts/modal_reflex_distill.py \\
+        --teacher-export /onnx_out/my_pi0_libero_teacher \\
+        --dataset lerobot/libero \\
+        --output-subdir pi0_snapflow_student \\
+        --steps 10000
+
+    # Bigger consistency-alpha if the student underfits:
+    modal run scripts/modal_reflex_distill.py \\
+        --teacher-export /onnx_out/my_pi05_teacher \\
+        --dataset my-org/my-demos \\
+        --output-subdir pi05_snapflow \\
+        --steps 20000 \\
+        --consistency-alpha 1.5
+
+Cost notes: pi0-scale SnapFlow at 10k steps on A100-80GB is ~1-2 hr
+($3-6). pi0.5 is ~30% slower. The LIBERO gate adds ~5-10 min at end.
+"""
+import os
+import subprocess
+import modal
+
+app = modal.App("reflex-distill")
+
+
+def _hf_secret():
+    token = os.environ.get("HF_TOKEN", "")
+    if token:
+        return modal.Secret.from_dict({"HF_TOKEN": token})
+    return modal.Secret.from_dict({})
+
+
+def _repo_head_sha() -> str:
+    try:
+        return subprocess.check_output(
+            ["git", "rev-parse", "HEAD"],
+            cwd=os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+        ).decode().strip()[:12]
+    except Exception:
+        return "main"
+
+
+_HEAD = _repo_head_sha()
+
+hf_cache = modal.Volume.from_name("pi0-hf-cache", create_if_missing=True)
+onnx_output = modal.Volume.from_name("pi0-onnx-outputs", create_if_missing=True)
+HF_CACHE_PATH = "/root/.cache/huggingface"
+ONNX_OUTPUT_PATH = "/onnx_out"
+
+# Distill needs the same image as finetune + the SnapFlow deps land
+# automatically via the `reflex-vla[monolithic]` wheel install.
+image = (
+    modal.Image.debian_slim(python_version="3.12")
+    .apt_install(
+        "git", "clang", "build-essential",
+        "ffmpeg", "libavutil-dev", "libavcodec-dev", "libavformat-dev",
+        "libswresample-dev", "libswscale-dev",
+    )
+    .pip_install(
+        "torch",
+        "safetensors>=0.4.0",
+        "huggingface_hub",
+        "transformers<5.4,>=4.40",
+        "numpy",
+        "Pillow",
+        "pydantic>=2.0",
+        "pyyaml",
+        "onnx>=1.16",
+        "onnxruntime-gpu>=1.20",
+        "onnxscript>=0.1",
+        "lerobot==0.5.1",
+        "peft>=0.10",
+        "accelerate>=0.30",
+        "datasets>=2.15",
+        "num2words",
+        "typer",
+        "rich",
+    )
+    .run_commands(
+        f'pip install "reflex-vla[monolithic] @ git+https://x-access-token:$GITHUB_TOKEN@github.com/rylinjames/reflex-vla@{_HEAD}"',
+        secrets=[modal.Secret.from_name("github-token")],
+    )
+    .env({
+        "HF_HOME": HF_CACHE_PATH,
+        "TRANSFORMERS_CACHE": f"{HF_CACHE_PATH}/transformers",
+    })
+)
+
+
+@app.function(
+    image=image,
+    gpu="A100-80GB",  # pi0/pi0.5 need the VRAM; teacher + student held in memory
+    timeout=28800,     # 8 hr — distill + LIBERO gate. 10k steps fits in 2hr.
+    volumes={HF_CACHE_PATH: hf_cache, ONNX_OUTPUT_PATH: onnx_output},
+    secrets=[_hf_secret()],
+)
+def distill_modal(
+    teacher_export: str,
+    dataset: str = "lerobot/libero",
+    output_subdir: str = "distill_snapflow",
+    num_steps: int = 10_000,
+    batch_size: int = 8,
+    learning_rate: float = 1e-4,
+    consistency_alpha: float = 1.0,
+    precision: str = "bf16",
+    target: str = "desktop",
+    libero_gate_pp: float = 5.0,
+    skip_libero_gate: bool = False,
+    skip_export: bool = False,
+):
+    """Run reflex.finetune.run_finetune(phase='distill') on Modal."""
+    import logging
+    from pathlib import Path
+
+    from reflex.finetune.config import FinetuneConfig
+    from reflex.finetune.hooks import HookRegistry
+    from reflex.finetune.hooks.libero_drop_gate import attach_to as attach_libero_gate
+    from reflex.finetune.run import run_finetune
+
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s")
+
+    output = Path(ONNX_OUTPUT_PATH) / output_subdir
+    output.mkdir(parents=True, exist_ok=True)
+
+    extra_args = {
+        "consistency_alpha": consistency_alpha,
+        "libero_gate_threshold_pp": libero_gate_pp,
+    }
+    if skip_libero_gate:
+        extra_args["libero_gate_skip"] = True
+
+    cfg = FinetuneConfig(
+        base="",
+        dataset=dataset,
+        output=output,
+        num_steps=num_steps,
+        batch_size=batch_size,
+        learning_rate=learning_rate,
+        mode="full",
+        precision=precision,
+        target=target,
+        skip_export=skip_export,
+        phase="distill",
+        teacher_export=teacher_export,
+        distillation_method="snapflow",
+        extra_lerobot_args=extra_args,
+    )
+
+    hooks = HookRegistry()
+    if not skip_libero_gate:
+        attach_libero_gate(hooks)
+
+    result = run_finetune(cfg, hooks=hooks)
+
+    # Make outputs visible to downstream Modal functions.
+    onnx_output.commit()
+
+    return {
+        "status": result.status,
+        "output_dir": str(result.output_dir),
+        "training_steps_completed": result.training_steps_completed,
+        "final_checkpoint_path": (
+            str(result.final_checkpoint_path)
+            if result.final_checkpoint_path else None
+        ),
+        "onnx_path": str(result.onnx_path) if result.onnx_path else None,
+        "verification_md_path": (
+            str(result.verification_md_path)
+            if result.verification_md_path else None
+        ),
+        "training_log_path": (
+            str(result.training_log_path) if result.training_log_path else None
+        ),
+        "error": result.error,
+    }
+
+
+@app.local_entrypoint()
+def main(
+    teacher_export: str,
+    dataset: str = "lerobot/libero",
+    output_subdir: str = "distill_snapflow",
+    steps: int = 10_000,
+    batch_size: int = 8,
+    learning_rate: float = 1e-4,
+    consistency_alpha: float = 1.0,
+    precision: str = "bf16",
+    target: str = "desktop",
+    libero_gate_pp: float = 5.0,
+    skip_libero_gate: bool = False,
+    skip_export: bool = False,
+):
+    print(f"[reflex distill on Modal — SnapFlow]")
+    print(f"  teacher: {teacher_export}")
+    print(f"  dataset: {dataset}")
+    print(f"  output:  /onnx_out/{output_subdir}")
+    print(f"  steps:   {steps}  batch={batch_size}  lr={learning_rate}  "
+          f"alpha={consistency_alpha}")
+    if skip_libero_gate:
+        print(f"  libero gate: DISABLED")
+    else:
+        print(f"  libero gate: {libero_gate_pp}pp drop threshold")
+    r = distill_modal.remote(
+        teacher_export=teacher_export,
+        dataset=dataset,
+        output_subdir=output_subdir,
+        num_steps=steps,
+        batch_size=batch_size,
+        learning_rate=learning_rate,
+        consistency_alpha=consistency_alpha,
+        precision=precision,
+        target=target,
+        libero_gate_pp=libero_gate_pp,
+        skip_libero_gate=skip_libero_gate,
+        skip_export=skip_export,
+    )
+    print("\n=== RESULT ===")
+    for k, v in r.items():
+        print(f"  {k}: {v}")
