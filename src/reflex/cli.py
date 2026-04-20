@@ -1437,5 +1437,15 @@ def doctor():
     )
 
 
+# Register `reflex finetune` subcommand. Lazy-import protects users who
+# don't have training deps installed — they only break if they run the
+# finetune command itself.
+try:
+    from reflex.finetune.cli import finetune_command
+    app.command(name="finetune")(finetune_command)
+except Exception as _finetune_import_exc:  # pragma: no cover - defensive
+    pass
+
+
 if __name__ == "__main__":
     app()

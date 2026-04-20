@@ -291,8 +291,9 @@ goals:
     weight: 7
 
   - id: fine-tuning-pipeline
-    description: "EXPLICIT SCOPE EXPANSION (2026-04-19): buyers often conflate 'deployment' with 'training' — they want an end-to-end workflow from their dataset to a deployed ONNX. Current reflex scope is deployment-only (PyTorch/JAX owns training per the product positioning). This goal adds a thin fine-tuning wrapper: `reflex finetune --base lerobot/smolvla_base --dataset <hf_id> --output ./my_export` that wraps lerobot's existing training loops + auto-exports the fine-tuned checkpoint. Lower weight than the other monetization blockers because it's a positioning question (is reflex 'the deploy tool' or 'the end-to-end tool?') — consider whether to build it before deciding to charge for it."
-    check: "test -f src/reflex/finetune.py && .venv/bin/python -c 'from reflex.finetune import run_finetune' 2>/dev/null"
+    status: done
+    description: "EXPLICIT SCOPE EXPANSION (2026-04-19): buyers often conflate 'deployment' with 'training' — they want an end-to-end workflow from their dataset to a deployed ONNX. v0.3 MVP landed 2026-04-20 — SmolVLA LoRA wrapper via subprocess-lerobot-train + auto-export. v0.5 adds pi0, parity-gate, calibration-first eval, preflight validator per finetune_SYNTHESIS.md. v1.0 conditional commit to orthogonalized platform. Full product decision in reflex_context/01_architecture/finetune_{competitive_research,sota_research,roadmap,architecture,SYNTHESIS}.md (5 docs, ~13k words)."
+    check: "(test -f src/reflex/finetune.py || test -f src/reflex/finetune/__init__.py) && PYTHONPATH=src .venv/bin/python -c 'from reflex.finetune import run_finetune, FinetuneConfig' 2>/dev/null"
     weight: 5
 
   # ── PHASE 2 LIBERO (added 2026-04-19 after first LIBERO-10 run = 0/10) ──
