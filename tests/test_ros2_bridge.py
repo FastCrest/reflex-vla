@@ -14,6 +14,44 @@ import numpy as np
 import pytest
 
 
+class TestServeRos2Flag:
+    """`reflex serve --ros2` short-circuits the HTTP path and hands off
+    to the ROS2 bridge. Verifies the CLI wiring invokes run_ros2_bridge
+    and doesn't spin up uvicorn / create_app.
+    """
+
+    def test_ros2_flag_routes_to_bridge(self, monkeypatch, tmp_path):
+        (tmp_path / "model.onnx").write_bytes(b"\x00")
+        (tmp_path / "reflex_config.json").write_text(
+            '{"model_type": "smolvla", "target": "desktop"}'
+        )
+
+        calls = {"bridge": 0, "app_created": 0}
+
+        def fake_run_bridge(*args, **kwargs):
+            calls["bridge"] += 1
+            assert str(args[0]) == str(tmp_path)
+
+        import reflex.runtime.ros2_bridge as bridge_mod
+        monkeypatch.setattr(bridge_mod, "run_ros2_bridge", fake_run_bridge)
+
+        def boom_create_app(*args, **kwargs):
+            calls["app_created"] += 1
+            raise AssertionError("create_app should NOT run in --ros2 mode")
+
+        import reflex.runtime.server as server_mod
+        monkeypatch.setattr(server_mod, "create_app", boom_create_app)
+
+        from typer.testing import CliRunner
+        from reflex.cli import app as cli_app
+
+        runner = CliRunner()
+        result = runner.invoke(cli_app, ["serve", str(tmp_path), "--ros2"])
+        assert result.exit_code == 0, result.output
+        assert calls["bridge"] == 1
+        assert calls["app_created"] == 0
+
+
 def _install_fake_rclpy(monkeypatch):
     """Register stub rclpy + message modules in sys.modules for this test."""
     rclpy = types.ModuleType("rclpy")

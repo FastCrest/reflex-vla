@@ -843,6 +843,16 @@ def serve(
         help="Execute frequency in Hz — the rate at which the robot pops "
              "an action from the buffer. Only used when --replan-hz > 0.",
     ),
+    ros2: bool = typer.Option(
+        False,
+        "--ros2",
+        help="Run a ROS2 bridge instead of the HTTP server. Subscribes to "
+             "image/state/task topics and publishes action chunks to an "
+             "action topic. Requires rclpy (apt-installed, not pip) — see "
+             "reflex ros2-serve for the standalone equivalent. Mutually "
+             "exclusive with the HTTP flags above (port, host, api-key, "
+             "max-batch, etc. are ignored in ROS2 mode).",
+    ),
     verbose: bool = typer.Option(False, help="Verbose logging"),
 ):
     """Start a VLA inference server. POST /act with image + instruction → actions.
@@ -862,6 +872,30 @@ def serve(
     if not onnx_files:
         console.print(f"[red]No ONNX files found in {export_dir}[/red]")
         raise typer.Exit(1)
+
+    # ROS2 mode short-circuits the HTTP path — hand off to the bridge.
+    if ros2:
+        try:
+            from reflex.runtime.ros2_bridge import run_ros2_bridge
+        except ImportError as exc:
+            console.print(f"[red]ros2 bridge unavailable: {exc}[/red]")
+            raise typer.Exit(2)
+        console.print(f"[bold green]reflex serve --ros2[/bold green]")
+        console.print(f"  export:   {export_dir}")
+        console.print(f"  device:   {device}")
+        console.print(
+            f"  [dim]HTTP flags ignored in ROS2 mode. Use `reflex ros2-serve` "
+            f"for full topic/rate customization.[/dim]"
+        )
+        try:
+            run_ros2_bridge(
+                export_dir,
+                device=device,
+                safety_config=safety_config or None,
+            )
+        except KeyboardInterrupt:
+            console.print("[yellow]ros2 bridge stopped.[/yellow]")
+        return
 
     # Parse providers
     provider_list: list[str] | None = None
