@@ -384,19 +384,26 @@ def run_decomposed_libero(
                                     noise=noise.cpu().numpy(),
                                 )
                                 chunk = torch.from_numpy(chunk_np).to(images[0].device)
-                                # Trim padded max_action_dim → real_action_dim
+                                # Trim padded max_action_dim → real env action dim
                                 chunk = chunk[:, :, :real_action_dim]
 
-                            # Postprocessor path — same as monolithic harness
-                            post = postprocessor({"action": chunk[0]})
-                            post_action = post["action"] if isinstance(post, dict) else post
-                            if isinstance(post_action, torch.Tensor):
-                                post_action = post_action.cpu().numpy()
-                            for step_action in post_action[:replan_steps]:
-                                action_plan.append(np.asarray(step_action, dtype=np.float32))
+                            # Postprocessor is a PolicyProcessorPipeline whose
+                            # to_transition/to_output converters accept a raw
+                            # tensor and return a tensor — pass the chunk
+                            # directly (same path as modal_libero_lerobot_native).
+                            post = postprocessor(chunk.detach().cpu())
+                            chunk_np_post = (
+                                post.detach().cpu().numpy()
+                                if hasattr(post, "detach")
+                                else np.asarray(post)
+                            )
+                            if chunk_np_post.ndim == 3:
+                                chunk_np_post = chunk_np_post[0]  # (chunk, N)
+                            chunk_np_post = chunk_np_post[:, :7]  # LIBERO 7D
+                            action_plan.extend(chunk_np_post[:replan_steps])
 
-                        a = action_plan.popleft()
-                        obs, _, done, info = env.step(a.tolist())
+                        action = action_plan.popleft()
+                        obs, _, done, info = env.step(np.asarray(action).tolist())
                         t += 1
                         if done:
                             break
