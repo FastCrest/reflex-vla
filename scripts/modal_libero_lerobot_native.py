@@ -168,6 +168,7 @@ def run_ported_libero(
     num_steps_wait: int = 10,
     seed: int = 7,
     snapflow_student: str = "",
+    snapflow_onnx: str = "",
     preprocessor_ref: str = "",
 ):
     """Port of openpi/examples/libero/main.py rolled out end-to-end.
@@ -202,21 +203,36 @@ def run_ported_libero(
     from huggingface_hub import snapshot_download
 
     # Dispatch:
-    # - snapflow_student path set → load via load_snapflow_student (SnapFlow
-    #   distilled checkpoint with target_time_embed_mlp weights) and use the
-    #   1-NFE inference path.
-    # - else, dispatch normal lerobot policy class by model_id prefix.
+    # - snapflow_onnx set → load ONNX session via onnxruntime (no PyTorch
+    #   inference at all, ORT does it). Still load load_snapflow_student
+    #   for the policy.config + _preprocess_images helpers.
+    # - snapflow_student set → load PyTorch student, use sample_actions_1step.
+    # - else: dispatch normal lerobot policy class by model_id prefix.
     use_1nfe = bool(snapflow_student)
+    use_onnx = bool(snapflow_onnx)
+    ort_session = None
+
+    if use_onnx and not snapflow_student:
+        raise ValueError(
+            "--snapflow-onnx requires --snapflow-student too — the harness "
+            "still needs the PyTorch policy for preprocessing helpers "
+            "(_preprocess_images / config)."
+        )
+
     if use_1nfe:
         from reflex.distill.snapflow_pi0_model import load_snapflow_student
         print(f"[ported] Loading SnapFlow student from {snapflow_student} (1-NFE inference)")
         policy = load_snapflow_student(snapflow_student)
-        detected_type = "snapflow_student"
-        # Preprocessor comes from the teacher checkpoint (student has the
-        # same config + processor files copied over by save_pretrained, but
-        # caller can override via --preprocessor-ref if the student's dir
-        # is missing them).
+        detected_type = "snapflow_student_onnx" if use_onnx else "snapflow_student"
         repo_dir = preprocessor_ref or snapflow_student
+        if use_onnx:
+            import onnxruntime as ort
+            print(f"[ported] Loading ONNX session from {snapflow_onnx}")
+            ort_session = ort.InferenceSession(snapflow_onnx, providers=["CPUExecutionProvider"])
+            ort_input_dtypes = {
+                i.name: i.type for i in ort_session.get_inputs()
+            }
+            print(f"[ported] ORT inputs: {[(n, t) for n, t in ort_input_dtypes.items()]}")
     else:
         model_key = model_id.split("/")[-1].lower()
         if model_key.startswith("pi05") or model_key.startswith("pi0.5") or "pi05" in model_key:
@@ -410,7 +426,52 @@ def run_ported_libero(
                             if t == num_steps_wait and ep == 0 and task_idx == tasks_to_run[0]:
                                 print(f"[debug] batch_pp keys: {sorted(batch_pp.keys())}")
                             with torch.no_grad():
-                                if use_1nfe:
+                                if use_onnx:
+                                    # SnapFlow 1-NFE via ONNX (FP32 or FP16).
+                                    # Same preprocessing path as PyTorch
+                                    # 1-NFE; only difference is ORT executes
+                                    # the model. We sample noise here so the
+                                    # ORT input is deterministic per call.
+                                    from lerobot.utils.constants import (
+                                        OBS_LANGUAGE_ATTENTION_MASK,
+                                        OBS_LANGUAGE_TOKENS, ACTION,
+                                    )
+                                    images, img_masks = policy._preprocess_images(batch_pp)
+                                    lang_tokens = batch_pp[OBS_LANGUAGE_TOKENS]
+                                    lang_masks = batch_pp[OBS_LANGUAGE_ATTENTION_MASK]
+                                    cfg = policy.config
+                                    chunk_size = cfg.chunk_size
+                                    action_dim_pad = cfg.max_action_dim
+                                    bsize = images[0].shape[0]
+                                    noise = torch.randn(
+                                        bsize, chunk_size, action_dim_pad,
+                                        device=images[0].device, dtype=torch.float32,
+                                    )
+                                    np_inputs = {
+                                        "img_base": images[0].cpu().numpy(),
+                                        "img_wrist_l": images[1].cpu().numpy(),
+                                        "img_wrist_r": images[2].cpu().numpy(),
+                                        "mask_base": img_masks[0].cpu().numpy(),
+                                        "mask_wrist_l": img_masks[1].cpu().numpy(),
+                                        "mask_wrist_r": img_masks[2].cpu().numpy(),
+                                        "lang_tokens": lang_tokens.cpu().numpy(),
+                                        "lang_masks": lang_masks.cpu().numpy(),
+                                        "noise": noise.cpu().numpy(),
+                                    }
+                                    # FP16 export was built with keep_io_types=False;
+                                    # cast float inputs to fp16 to match the session.
+                                    import numpy as _np
+                                    for k, v in list(np_inputs.items()):
+                                        meta_type = ort_input_dtypes.get(k, "")
+                                        if "float16" in meta_type and v.dtype == _np.float32:
+                                            np_inputs[k] = v.astype(_np.float16)
+                                    chunk_np = ort_session.run(["actions"], np_inputs)[0]
+                                    if chunk_np.dtype != _np.float32:
+                                        chunk_np = chunk_np.astype(_np.float32)
+                                    chunk = torch.from_numpy(chunk_np).to(images[0].device)
+                                    orig_dim = cfg.output_features[ACTION].shape[0]
+                                    chunk = chunk[:, :, :orig_dim]
+                                elif use_1nfe:
                                     # SnapFlow 1-NFE: single denoise_step
                                     # at target_time=1 via the subclass override.
                                     # pi0.5 signature differs from pi0 — no state.
@@ -528,6 +589,7 @@ def main(
     suite: str = "libero_10",
     model_id: str = "HuggingFaceVLA/smolvla_libero",
     snapflow_student: str = "",
+    snapflow_onnx: str = "",
     preprocessor_ref: str = "",
 ):
     """
