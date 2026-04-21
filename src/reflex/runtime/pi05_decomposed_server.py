@@ -147,6 +147,7 @@ class Pi05DecomposedInference:
         phash_hamming_threshold: int = 6,
         cache_level: str = "prefix",
         action_cache_max_age_steps: int = 2,
+        cache_ignore_lang: bool = False,
     ):
         """``cache_level`` controls which layer is cached:
 
@@ -174,6 +175,11 @@ class Pi05DecomposedInference:
             raise ValueError(f"cache_level must be 'none'|'prefix'|'action', got {cache_level!r}")
         self.cache_level = cache_level
         self.action_cache_max_age_steps = action_cache_max_age_steps
+        # cache_ignore_lang: bypass lang_hash check for state-in-language
+        # VLAs (pi0.5). Safe when reset_cache() is called between
+        # episodes (prevents cross-task cache collisions). Required
+        # for pi0.5 action-chunk cache to actually hit in production.
+        self.cache_ignore_lang = cache_ignore_lang
         self._call_index: int = 0  # monotonic call counter for step-count TTL
         self._action_cache: ActionCacheEntry | None = None
         # Default prefers CUDA when available, falls back to CPU if the
@@ -258,8 +264,9 @@ class Pi05DecomposedInference:
         if self.cache_level == "action" and self._action_cache is not None:
             entry = self._action_cache
             steps_since = self._call_index - entry.step_index
+            lang_ok = self.cache_ignore_lang or entry.lang_hash == lang_hash
             if (steps_since <= self.action_cache_max_age_steps
-                and entry.lang_hash == lang_hash
+                and lang_ok
                 and self._phashes_match(entry.image_phashes, image_phashes)):
                 self._stats.action_hits += 1
                 return entry.actions
