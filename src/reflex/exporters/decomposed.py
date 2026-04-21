@@ -410,17 +410,22 @@ def _build_expert_class():
             prefix_pad_masks = args[PI05_PALIGEMMA_LAYERS * 2]
             noise = args[PI05_PALIGEMMA_LAYERS * 2 + 1]
 
-            # Reconstruct a proper DynamicCache via from_legacy_cache(),
-            # which accepts a tuple of (key, value) tensor pairs per
-            # layer. transformers 5.3's pi_gemma forward does
-            # isinstance(past_kv, DynamicCache) checks internally, so
-            # we must pass a real DynamicCache, not a shim.
+            # Reconstruct a proper DynamicCache by populating per-layer
+            # via .update() — transformers 5.3 removed from_legacy_cache
+            # as a classmethod on DynamicCache. update() appends to an
+            # empty cache layer so the first call with a given layer_idx
+            # initializes that layer's K/V. pi_gemma forward needs a
+            # real DynamicCache (isinstance check) so we can't pass a
+            # shim.
             from transformers.cache_utils import DynamicCache
-            legacy = tuple(
-                (past_flat[2 * i], past_flat[2 * i + 1])
-                for i in range(PI05_PALIGEMMA_LAYERS)
-            )
-            past_kv = DynamicCache.from_legacy_cache(legacy)
+            past_kv = DynamicCache()
+            for i in range(PI05_PALIGEMMA_LAYERS):
+                past_kv.update(
+                    key_states=past_flat[2 * i],
+                    value_states=past_flat[2 * i + 1],
+                    layer_idx=i,
+                    cache_kwargs=None,
+                )
 
             action_dtype = self.model.action_in_proj.weight.dtype
             if noise.dtype != action_dtype:
