@@ -343,17 +343,17 @@ def _build_prefix_class():
                 use_cache=True,
             )
 
-            # Flatten DynamicCache → tuple of tensors. Transformers 5.3
-            # DynamicCache exposes `to_legacy_cache()` which returns a
-            # tuple of ``(key, value)`` pairs per layer. We use the
-            # legacy form because it's tensor-only (no Python object
-            # nesting) and traces cleanly through torch.export.
-            legacy = past_key_values.to_legacy_cache()
+            # Flatten DynamicCache → tuple of tensors. transformers 5.3
+            # DynamicCache has a `.layers[i]` list of `DynamicLayer`
+            # objects, each exposing `.keys` and `.values` tensors. The
+            # onnx-diagnostic torch_export_patches context may strip
+            # to_legacy_cache off the class, so we pull the tensors
+            # directly from the per-layer objects.
             flat: list = []
             for layer_idx in range(PI05_PALIGEMMA_LAYERS):
-                k, v = legacy[layer_idx]
-                flat.append(k)
-                flat.append(v)
+                layer = past_key_values.layers[layer_idx]
+                flat.append(layer.keys)
+                flat.append(layer.values)
             flat.append(prefix_pad_masks)
             return tuple(flat)
 
