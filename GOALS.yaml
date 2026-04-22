@@ -449,3 +449,39 @@ goals:
     description: "vLLM-style token-level scheduler with paged attention. PERMANENT SKIP. Solves a problem flow-matching VLAs don't have: action chunks are fixed-size (50 actions, one forward pass) — there's no autoregressive token generation to schedule. Cost to copy = 5000+ lines of complex code. Value for VLA = literally zero. If a future contributor argues for adding this, point them here."
     check: "true  # non-goal; always passes"
     weight: 0
+
+  # ── PREFIX-CACHE MOAT — properly test + build (added 2026-04-22 PM) ──
+  # After v0.5 retry stage-3 student matched teacher (14/15 = 93.3%), we
+  # ran cache-on/off LIBERO on the decomposed export and got 13/15 each
+  # with 0% cache hit rate. Investigation revealed two bugs that
+  # invalidated the test:
+  # (1) decomposed LIBERO harness doesn't swap to the state-out
+  #     preprocessor → state still in lang prompt → lang drifts per frame
+  # (2) the script's cache modes (none|phash|action) test image-keyed or
+  #     full-skip caching, NOT episode-keyed lang-cache (the actual moat)
+  # Plan to do this RIGHT — see reflex_context/04_product/wedge_priority_ranking.md.
+
+  - id: serve-fix-decomposed-libero-state-out-preprocessor
+    description: "BUG: scripts/modal_libero_pi05_decomposed.py + src/reflex/runtime/pi05_decomposed_server.py don't swap to Pi05PrepareTokenizerStateOutStep when variant=state_out. Same fix as commit 16a1057 made to modal_libero_lerobot_native.py. Without this, state is double-fed (via state_proj AND lang prompt) which (a) confuses the model — explains 13/15 vs 14/15 PyTorch drop, (b) lang drifts per frame so any lang-keyed cache hits 0%."
+    check: "grep -q 'state_out\\|swap_prepare_step_in_pipeline' src/reflex/runtime/pi05_decomposed_server.py 2>/dev/null"
+    weight: 9
+
+  - id: serve-verify-lang-token-stability
+    description: "Verify v0.5 state-out preprocessor produces identical lang_tokens across all frames within an episode. 5-min test: run preprocessor on 50 frames of one LIBERO episode, hash each lang_tokens output, confirm all hashes match. If they don't, there's a deeper preprocessor bug. If they do, the cache moat is structurally sound."
+    check: "test -f scripts/verify_pi05_state_out_lang_stability.py 2>/dev/null"
+    weight: 8
+
+  - id: serve-pi05-prefix-cache-impl
+    description: "Build production Pi05PrefixCache class per reference/deep_dive_vllm_prefix_cache.md design. Episode-keyed (not request-keyed like vLLM), LRU eviction, hit-rate metric. Replaces the script-level phash hack. Lives in src/reflex/runtime/pi05_decomposed_server.py + new src/reflex/runtime/episode_cache.py. ~1-2 days work after fix-state-out-preprocessor + verify-lang-stability gates."
+    check: "test -f src/reflex/runtime/episode_cache.py && grep -q 'Pi05PrefixCache' src/reflex/runtime/pi05_decomposed_server.py 2>/dev/null"
+    weight: 10
+
+  - id: serve-cache-on-off-libero-real
+    description: "Re-run LIBERO cache-on vs cache-off after Pi05PrefixCache is built. The LOAD-BEARING measurement: cache-on success_rate ≥ cache-off proves the moat is real for production. If yes, ship the 5x serve speedup claim. If no, pivot to action-chunk caching. Depends on serve-fix-decomposed-libero-state-out-preprocessor + serve-pi05-prefix-cache-impl."
+    check: "grep -q 'cache_on.*libero.*v0.5\\|cache-on-real' reflex_context/03_experiments/2026-04-22-v0.5-retry-stage3-libero-result.md 2>/dev/null"
+    weight: 10
+
+  - id: serve-latency-microbench-cache
+    description: "Measure VLM prefix forward time vs expert denoise forward time on the v0.5 student decomposed ONNX. Theoretical cache speedup = (vlm_time + expert_time) / expert_time. Target ≥3x (per design VLM is ~80%% of compute). Cheap (~\$1, 30 min Modal). Independent of cache-on/off LIBERO test — gives the upper-bound number for product positioning."
+    check: "grep -q 'latency.*v050.*decomposed\\|microbench.*v0.5' reflex_context/03_experiments/ 2>/dev/null"
+    weight: 7
