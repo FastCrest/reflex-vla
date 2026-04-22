@@ -257,6 +257,31 @@ def run_decomposed_libero(
         to_transition=policy_action_to_transition,
         to_output=transition_to_policy_action,
     )
+
+    # v0.5 state-out: if the decomposed export was built with
+    # expert_takes_state=True, the student expects state via the
+    # state_proj input AND a stripped lang prompt. Default preprocessor
+    # bakes state into lang ("Task: ..., State: ...") which (a) double-
+    # feeds state to the model, (b) makes lang_tokens drift per frame
+    # → kills the prefix cache hit rate. Swap to the state-out step.
+    import json as _json
+    decomposed_cfg_path = Path(decomposed_dir) / "reflex_config.json"
+    is_state_out_export = False
+    if decomposed_cfg_path.exists():
+        with decomposed_cfg_path.open() as _f:
+            _dcfg = _json.load(_f)
+        is_state_out_export = (
+            _dcfg.get("decomposed", {}).get("expert_takes_state", False)
+        )
+    if is_state_out_export:
+        from reflex.distill.pi05_state_out_processor import swap_prepare_step_in_pipeline
+        max_state_dim = action_dim_pad  # pi0.5 max_state_dim == max_action_dim == 32
+        swap_prepare_step_in_pipeline(preprocessor, max_state_dim=max_state_dim)
+        print(
+            f"[decomposed] Detected state-out export — swapped preprocessor "
+            f"to Pi05PrepareTokenizerStateOutStep (max_state_dim={max_state_dim})"
+        )
+
     print(f"[decomposed] Policy + processors ready. chunk_size={chunk_size}, "
           f"max_action_dim={action_dim_pad}, real_action_dim={real_action_dim}")
 
