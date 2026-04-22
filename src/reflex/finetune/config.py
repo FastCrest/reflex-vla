@@ -86,6 +86,18 @@ class FinetuneConfig:
     v0.3 supports 'snapflow' only. 'consistency' (DDPM for GR00T)
     lands in v0.5+."""
 
+    variant: str = "default"
+    """Architecture variant of the student. v0.5 adds 'state_out' for
+    pi0.5 students: strips state from the language prompt and adds an
+    explicit state_proj layer that consumes proprio state. Unlocks the
+    prefix KV cache in production (lang becomes stable per episode).
+    Values:
+      - 'default': v0.3.1 SnapFlow student (state-in-lang via the
+        default pi0.5 preprocessor + no state_proj layer).
+      - 'state_out': pi0.5 only. Applies enable_snapflow_state_out
+        to the student + swaps the preprocessor step.
+    See reflex_vault 01_architecture/distill_state_out_pi05_design.md."""
+
     def __post_init__(self) -> None:
         self.output = Path(self.output)
 

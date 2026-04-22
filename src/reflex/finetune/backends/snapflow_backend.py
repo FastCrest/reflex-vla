@@ -149,7 +149,32 @@ class SnapFlowBackend:
         if policy_type in ("pi0", "pi05"):
             from reflex.distill.snapflow_pi0_model import enable_snapflow
             enable_snapflow(teacher.model)
-            enable_snapflow(student.model)
+
+            variant = getattr(cfg, "variant", "default")
+            if variant == "state_out" and policy_type == "pi05":
+                from reflex.distill.snapflow_pi0_model import enable_snapflow_state_out
+                # Student: state-out variant. enable_snapflow_state_out internally
+                # calls enable_snapflow first (adds target_time_embed_mlp) then
+                # registers state_proj + swaps to SnapFlowPI05StateOutPytorch.
+                enable_snapflow_state_out(student.model)
+                logger.info(
+                    "[snapflow] student uses STATE-OUT variant — will receive "
+                    "proprio state via state_proj, not lang tokens. "
+                    "Teacher stays on default (state-in-lang) preprocessor path."
+                )
+            elif variant == "state_out":
+                return CheckpointResult(
+                    final_checkpoint_path=Path(cfg.output),
+                    training_steps_completed=0,
+                    status="training_failed",
+                    error=(
+                        f"variant='state_out' is only supported for pi05 "
+                        f"(state-in-language is pi0.5 specific); got policy_type={policy_type}"
+                    ),
+                )
+            else:
+                enable_snapflow(student.model)
+
             for p in teacher.model.target_time_embed_mlp.parameters():
                 p.requires_grad = False
             for m in (teacher.model, student.model):
