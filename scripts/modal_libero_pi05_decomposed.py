@@ -409,6 +409,7 @@ def run_decomposed_libero(
                                 for k, v in batch_pp.items()
                             }
                             with torch.no_grad():
+                                from lerobot.utils.constants import OBS_STATE
                                 images, img_masks = policy._preprocess_images(batch_pp)
                                 lang_tokens = batch_pp[OBS_LANGUAGE_TOKENS]
                                 lang_masks = batch_pp[OBS_LANGUAGE_ATTENTION_MASK]
@@ -417,6 +418,11 @@ def run_decomposed_libero(
                                     bsize, chunk_size, action_dim_pad,
                                     device=images[0].device, dtype=torch.float32,
                                 )
+                                # v0.5: pass state explicitly. predict_action_chunk
+                                # accepts state=None for default exports and uses
+                                # it for state-out exports (auto-detects from
+                                # reflex_config.json's expert_takes_state flag).
+                                state_np = batch_pp[OBS_STATE].cpu().numpy() if OBS_STATE in batch_pp else None
                                 chunk_np = inference.predict_action_chunk(
                                     img_base=images[0].cpu().numpy(),
                                     img_wrist_l=images[1].cpu().numpy(),
@@ -427,6 +433,7 @@ def run_decomposed_libero(
                                     lang_tokens=lang_tokens.cpu().numpy(),
                                     lang_masks=lang_masks.cpu().numpy(),
                                     noise=noise.cpu().numpy(),
+                                    state=state_np,
                                 )
                                 chunk = torch.from_numpy(chunk_np).to(images[0].device)
                                 # Trim padded max_action_dim → real env action dim
