@@ -140,8 +140,15 @@ def distill_modal(
     skip_libero_gate: bool = False,
     skip_export: bool = False,
     image_key_map_json: str = "",
+    variant: str = "default",
 ):
-    """Run reflex.finetune.run_finetune(phase='distill') on Modal."""
+    """Run reflex.finetune.run_finetune(phase='distill') on Modal.
+
+    Set ``variant='state_out'`` for the v0.5 pi0.5 state-out student
+    (strips proprio state from lang, adds explicit state_proj).
+    Unlocks the prefix KV cache in production deployment. Requires
+    teacher_export to be a pi0.5 model.
+    """
     import logging
     from pathlib import Path
 
@@ -179,6 +186,7 @@ def distill_modal(
         phase="distill",
         teacher_export=teacher_export,
         distillation_method="snapflow",
+        variant=variant,
         extra_lerobot_args=extra_args,
     )
 
@@ -226,6 +234,7 @@ def main(
     skip_libero_gate: bool = False,
     skip_export: bool = False,
     image_key_map_json: str = "",
+    variant: str = "default",
 ):
     print(f"[reflex distill on Modal — SnapFlow]")
     print(f"  teacher: {teacher_export}")
@@ -233,6 +242,8 @@ def main(
     print(f"  output:  /onnx_out/{output_subdir}")
     print(f"  steps:   {steps}  batch={batch_size}  lr={learning_rate}  "
           f"alpha={consistency_alpha}")
+    if variant != "default":
+        print(f"  variant: {variant}")
     if skip_libero_gate:
         print(f"  libero gate: DISABLED")
     else:
@@ -251,6 +262,7 @@ def main(
         skip_libero_gate=skip_libero_gate,
         skip_export=skip_export,
         image_key_map_json=image_key_map_json,
+        variant=variant,
     )
     print("\n=== RESULT ===")
     for k, v in r.items():
