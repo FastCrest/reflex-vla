@@ -12,3 +12,7 @@ build/
 *.engine
 reflex_export/
 **/reflex_export/
+
+# Reference repos — local shallow clones of competitor OSS for serve work.
+# See reflex_context/01_decisions/2026-04-22-reference-repos-folder.md.
+reference/
