@@ -97,8 +97,9 @@ def export_decomposed_modal(
     output_subdir: str = "pi05_decomposed_smoke",
     num_steps: int = 1,
     student_checkpoint: str = "",
+    variant: str = "default",
 ):
-    """Run the decomposed export on Modal."""
+    """Run the decomposed export on Modal. variant='state_out' for v0.5 students."""
     import logging
     from pathlib import Path
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s")
@@ -117,6 +118,7 @@ def export_decomposed_modal(
         output_dir=str(out),
         num_steps=num_steps,
         student_checkpoint=str(student) if student else None,
+        variant=variant,
     )
     onnx_output.commit()
 
@@ -134,12 +136,14 @@ def main(
     output_subdir: str = "pi05_decomposed_smoke",
     num_steps: int = 1,
     student_checkpoint: str = "",
+    variant: str = "default",
 ):
     r = export_decomposed_modal.remote(
         model_id=model_id,
         output_subdir=output_subdir,
         num_steps=num_steps,
         student_checkpoint=student_checkpoint,
+        variant=variant,
     )
     print("\n=== RESULT ===")
     for k, v in r.items():
