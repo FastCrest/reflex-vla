@@ -395,3 +395,25 @@ goals:
     description: "Second benchmark beyond LIBERO. SimplerEnv is the other standard benchmark for VLA evaluation (pi0 paper uses it). A task-success number on SimplerEnv would (a) de-risk our LIBERO number (no single-benchmark over-optimization), (b) open pi0-focused customers who benchmark on SimplerEnv. Requires SimplerEnv install (Python 3.10 + their deps) + adapter to our VLA policies."
     check: "test -f scripts/modal_simpler_env_task_success.py 2>/dev/null"
     weight: 6
+
+  # ── SERVE-AS-MOAT (added 2026-04-22 strategic frame) ──────────────
+  # Strategic priority: distill is the harpoon (gets users in the door),
+  # serve is the rope (creates recurring lock-in). Once v0.5 distill +
+  # cache-on LIBERO confirm the prefix-cache speedup is real, serve
+  # becomes the next focus. Full reasoning in
+  # reflex_context/04_product/wedge_priority_ranking.md.
+
+  - id: serve-episode-aware-cache
+    description: "Episode-aware prefix KV caching: serve tracks an episode_id, caches the VLM prefix per episode, denoise per timestep just runs the action expert. Drops per-call latency ~80ms→~15ms (5x). The killer feature Triton physically can't do — Triton is stateless, has no concept of an episode. Requires v0.5 state-out distill landing first (otherwise lang prompt drifts every frame and cache hit rate is 0% in production, as proven by 2026-04-22 latency probe vs LIBERO cache-on disagreement). Order: v0.5 stage-3 LIBERO eval ≥50% → cache plumbing in serve runtime → cache-on vs cache-off LIBERO + latency microbench."
+    check: "grep -q 'episode_id' src/reflex/runtime/server.py 2>/dev/null"
+    weight: 10
+
+  - id: serve-rtc-wrapper
+    description: "Wrap lerobot.policies.rtc for Real-Time Chunking (replan-while-execute pattern from arxiv 2506.07339). Pi0/pi05 are designed to be run with RTC; without it serve leaves 2-3x throughput on the table. Sprint week 1-2 work."
+    check: "grep -q 'rtc\\|RTC\\|real_time_chunking' src/reflex/runtime/*.py 2>/dev/null"
+    weight: 8
+
+  - id: serve-one-line-install
+    description: "pip install reflex-vla && reflex serve <hf-id> works on a Jetson with no Docker, no Triton YAML, no NVIDIA Container Toolkit. The DX win that beats Triton even though Triton wins on raw features. Most customers will tolerate a 1.5x latency hit for a 60s install vs a 4-hour Triton-on-Jetson setup."
+    check: "test -f docs/quickstart_jetson.md && grep -q 'pip install reflex-vla' README.md 2>/dev/null"
+    weight: 7
