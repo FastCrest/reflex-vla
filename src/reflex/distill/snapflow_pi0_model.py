@@ -679,8 +679,11 @@ def _resolve_snapflow_pi05_state_out_class() -> type:
                 raise ValueError(
                     "SnapFlowPI05StateOutPytorch.embed_suffix requires state"
                 )
-            if self.state_proj.weight.dtype == torch.float32 and state.dtype != torch.float32:
-                state = state.to(torch.float32)
+            # Always match state_proj's weight dtype (bf16 during training,
+            # fp32 in some inference paths). Earlier code only handled the
+            # fp32-weights case, missing the common bf16-weights case.
+            if state.dtype != self.state_proj.weight.dtype:
+                state = state.to(self.state_proj.weight.dtype)
 
             # Run parent's embed_suffix unchanged — gets us the correct
             # suffix shape + attention masks + adarms_cond.
