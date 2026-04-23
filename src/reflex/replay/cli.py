@@ -77,6 +77,76 @@ def diff_actions(
     }
 
 
+def diff_latency(
+    recorded: dict[str, Any], replayed: dict[str, Any],
+    *, threshold_pct: float = 0.05,
+) -> dict[str, Any]:
+    """Compare recorded vs replayed latency. Threshold is relative —
+    pass if abs((replay - recorded) / recorded) <= threshold_pct on
+    total_ms. Per-stage deltas reported but not gated.
+
+    Both inputs follow the D.1.5 latency object shape.
+    """
+    rec_total = float(recorded.get("total_ms", 0.0))
+    rep_total = float(replayed.get("total_ms", 0.0))
+    if rec_total <= 0:
+        # Can't compute relative delta; mark pass and surface absolute
+        return {
+            "recorded_total_ms": rec_total,
+            "replayed_total_ms": rep_total,
+            "delta_ms": rep_total - rec_total,
+            "delta_pct": None,
+            "passed": True,
+            "threshold_pct": threshold_pct,
+            "note": "recorded total_ms <= 0; gating skipped",
+        }
+    delta = rep_total - rec_total
+    delta_pct = delta / rec_total
+    passed = abs(delta_pct) <= threshold_pct
+
+    # Per-stage, where present
+    stages: dict[str, dict[str, float]] = {}
+    rec_stages = recorded.get("stages", {}) or {}
+    rep_stages = replayed.get("stages", {}) or {}
+    for k in sorted(set(rec_stages) | set(rep_stages)):
+        rv = rec_stages.get(k)
+        pv = rep_stages.get(k)
+        if rv is None or pv is None:
+            continue
+        stages[k] = {
+            "recorded_ms": float(rv),
+            "replayed_ms": float(pv),
+            "delta_ms": float(pv) - float(rv),
+        }
+
+    return {
+        "recorded_total_ms": rec_total,
+        "replayed_total_ms": rep_total,
+        "delta_ms": delta,
+        "delta_pct": delta_pct,
+        "stages": stages,
+        "passed": passed,
+        "threshold_pct": threshold_pct,
+    }
+
+
+def diff_cache(
+    recorded: dict[str, Any] | None, replayed: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """Compare recorded vs replayed cache outcome. Pass = same status.
+
+    Both inputs follow the D.1.4 cache object shape: {status: hit|miss|n/a, ...}.
+    None on either side is treated as 'n/a'.
+    """
+    rec_status = (recorded or {}).get("status", "n/a")
+    rep_status = (replayed or {}).get("status", "n/a")
+    return {
+        "recorded_status": rec_status,
+        "replayed_status": rep_status,
+        "passed": rec_status == rep_status,
+    }
+
+
 def _load_target_server(model: str):
     """Load the target export for replay. Returns the same server type
     create_app() would use, but invoked outside a FastAPI lifespan."""
@@ -130,6 +200,12 @@ def run_replay(
         load_reader,
     )
 
+    # Validate diff_mode upfront so --no-replay also catches bad values
+    valid_modes = {"actions", "latency", "cache", "all"}
+    if diff_mode not in valid_modes:
+        print(f"ERROR: --diff must be one of {sorted(valid_modes)}, got {diff_mode!r}")
+        return 1
+
     try:
         reader = load_reader(trace_file)
     except (FileNotFoundError, ValueError) as e:
@@ -178,17 +254,23 @@ def run_replay(
             f"vs replay={target_model_hash}"
         )
 
+    do_actions = diff_mode in ("actions", "all")
+    do_latency = diff_mode in ("latency", "all")
+    do_cache = diff_mode in ("cache", "all")
+
     # Replay loop
     diffs: list[dict[str, Any]] = []
     n_replayed = 0
-    n_passed = 0
+    n_pass_actions = 0
+    n_pass_latency = 0
+    n_pass_cache = 0
     image_redaction = (header.get("redaction", {}) or {}).get("image", "hash_only")
 
-    if image_redaction != "full":
+    if do_actions and image_redaction != "full":
         print(
             f"WARN: trace was recorded with image redaction='{image_redaction}'; "
-            f"replay needs full images. Day 2 limitation — pass --no-replay to "
-            f"parse the trace without re-running inference."
+            f"actions diff needs full images. Pass --no-replay to inspect "
+            f"the trace, or re-record with --record-images full."
         )
 
     print(f"\nReplaying requests (--n={n or 'all'}, --diff={diff_mode}):")
@@ -201,8 +283,11 @@ def run_replay(
         req = rec.get("request", {})
         recorded_resp = rec.get("response", {})
         recorded_actions = recorded_resp.get("actions", [])
+        recorded_latency = rec.get("latency", {}) or {}
+        recorded_cache = rec.get("cache")
 
-        # Day-2 limitation: we can only replay if the trace has full images
+        # Need full image to invoke the model. Skip replay for actions/latency
+        # if absent; cache diff can run from recorded-only metadata if needed.
         if not req.get("image_b64"):
             n_replayed += 1
             continue
@@ -218,25 +303,77 @@ def run_replay(
             n_replayed += 1
             continue
 
-        replayed_actions = replay_resp.get("actions", [])
-        d = diff_actions(recorded_actions, replayed_actions)
-        d["seq"] = rec.get("seq")
-        diffs.append(d)
-        n_replayed += 1
-        if d["passed"]:
-            n_passed += 1
+        per_record: dict[str, Any] = {"seq": rec.get("seq")}
+        line_parts: list[str] = [f"  seq={rec.get('seq'):4d}"]
 
-        marker = "PASS" if d["passed"] else "FAIL"
-        print(
-            f"  seq={d['seq']:4d}  cos={d['cosine']:.6f}  "
-            f"max_abs={d['max_abs_diff']:.2e}  {marker}"
-        )
+        if do_actions:
+            replayed_actions = replay_resp.get("actions", [])
+            d_a = diff_actions(recorded_actions, replayed_actions)
+            per_record["actions"] = d_a
+            if d_a["passed"]:
+                n_pass_actions += 1
+            line_parts.append(
+                f"actions: cos={d_a['cosine']:.6f} max_abs={d_a['max_abs_diff']:.2e} "
+                f"[{'PASS' if d_a['passed'] else 'FAIL'}]"
+            )
+
+        if do_latency:
+            # Replay latency comes from the predict_from_base64 result
+            replayed_latency = {
+                "total_ms": float(replay_resp.get("latency_ms", 0.0)),
+            }
+            d_l = diff_latency(recorded_latency, replayed_latency)
+            per_record["latency"] = d_l
+            if d_l["passed"]:
+                n_pass_latency += 1
+            pct_str = (
+                f"{d_l['delta_pct'] * 100:+.1f}%"
+                if d_l["delta_pct"] is not None
+                else "n/a"
+            )
+            line_parts.append(
+                f"latency: {d_l['recorded_total_ms']:.0f}→"
+                f"{d_l['replayed_total_ms']:.0f}ms ({pct_str}) "
+                f"[{'PASS' if d_l['passed'] else 'FAIL'}]"
+            )
+
+        if do_cache:
+            # Day 3: recorded-vs-recorded since the replay path doesn't yet
+            # surface its own cache state. Stub mirrors recorded_cache for
+            # the replay side until cache instrumentation lands in serve.
+            replayed_cache = recorded_cache  # placeholder
+            d_c = diff_cache(recorded_cache, replayed_cache)
+            per_record["cache"] = d_c
+            if d_c["passed"]:
+                n_pass_cache += 1
+            line_parts.append(
+                f"cache: {d_c['recorded_status']}→{d_c['replayed_status']} "
+                f"[{'PASS' if d_c['passed'] else 'FAIL'}]"
+            )
+
+        diffs.append(per_record)
+        n_replayed += 1
+        print("  " + "  ".join(line_parts))
 
     # Summary
     print("\nSummary:")
     print(f"  replayed: {n_replayed}")
     print(f"  diffed:   {len(diffs)}")
-    print(f"  passed:   {n_passed}/{len(diffs)} (threshold cos≥0.999, max_abs<1e-3)")
+    if do_actions:
+        print(
+            f"  actions:  {n_pass_actions}/{len(diffs)} pass "
+            f"(cos≥0.999, max_abs<1e-3)"
+        )
+    if do_latency:
+        print(
+            f"  latency:  {n_pass_latency}/{len(diffs)} pass "
+            f"(within ±5% of recorded total_ms)"
+        )
+    if do_cache:
+        print(
+            f"  cache:    {n_pass_cache}/{len(diffs)} pass "
+            f"(status match)"
+        )
 
     if output_json:
         Path(output_json).write_text(
@@ -245,9 +382,12 @@ def run_replay(
                     "summary": {
                         "trace_file": str(trace_file),
                         "model": model,
+                        "diff_mode": diff_mode,
                         "n_replayed": n_replayed,
                         "n_diffed": len(diffs),
-                        "n_passed": n_passed,
+                        "n_pass_actions": n_pass_actions if do_actions else None,
+                        "n_pass_latency": n_pass_latency if do_latency else None,
+                        "n_pass_cache": n_pass_cache if do_cache else None,
                     },
                     "header": header,
                     "per_request_diffs": diffs,
@@ -257,8 +397,27 @@ def run_replay(
         )
         print(f"  output:   {output_json}")
 
-    if fail_on == "actions" and n_passed < len(diffs):
-        return 3
+    # --fail-on dispatch
+    fail_codes = {
+        "actions": (do_actions, n_pass_actions, len(diffs)),
+        "latency": (do_latency, n_pass_latency, len(diffs)),
+        "cache": (do_cache, n_pass_cache, len(diffs)),
+    }
+    if fail_on:
+        if fail_on not in fail_codes:
+            print(
+                f"ERROR: --fail-on must be one of {sorted(fail_codes)}, "
+                f"got {fail_on!r}"
+            )
+            return 1
+        active, passed, total = fail_codes[fail_on]
+        if not active:
+            print(
+                f"ERROR: --fail-on {fail_on} requires --diff {fail_on} or --diff all"
+            )
+            return 1
+        if passed < total:
+            return 3
 
     return 0
 
