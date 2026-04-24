@@ -64,6 +64,8 @@ serve = [
     "Pillow>=10.0.0",
     # Embodiment-config validation (per-embodiment-configs B.1). Tiny dep.
     "jsonschema>=4.0",
+    # Prometheus /metrics endpoint (D.1.8 prometheus-grafana). Tiny dep.
+    "prometheus-client>=0.19.0",
 ]
 safety = ["yourdfpy"]
 # Native parity verification — installs lerobot + its deps so

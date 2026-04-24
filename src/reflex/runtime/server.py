@@ -38,6 +38,29 @@ from .record import (
 )
 from .tracing import get_tracer, setup_tracing, shutdown_tracing
 
+# Optional Prometheus metrics — gated on the [serve] extra (prometheus-client).
+# When absent, all metric calls become no-ops via the import guard.
+try:
+    from reflex.observability import (
+        METRICS_CONTENT_TYPE,
+        record_act_latency,
+        render_metrics,
+        set_server_up,
+        track_in_flight,
+    )
+    _METRICS_AVAILABLE = True
+except ImportError:  # pragma: no cover
+    _METRICS_AVAILABLE = False
+    METRICS_CONTENT_TYPE = "text/plain"
+    def record_act_latency(*args, **kwargs): pass
+    def render_metrics() -> bytes: return b"# prometheus_client not installed\n"
+    def set_server_up(*args): pass
+
+    from contextlib import contextmanager as _cm
+    @_cm
+    def track_in_flight(*args, **kwargs):
+        yield
+
 logger = logging.getLogger(__name__)
 _tracer = get_tracer(__name__)
 
@@ -1180,6 +1203,9 @@ def create_app(
         # OTEL_EXPORTER_OTLP_ENDPOINT is set (or default localhost:4317).
         # No-ops cleanly if deps absent — server behavior unchanged.
         setup_tracing(service_name="reflex-vla")
+        # Prometheus liveness signal — operators rely on Prometheus's own
+        # `up` metric for absent-server detection; this is defense-in-depth.
+        set_server_up(1)
         if getattr(server, "embodiment_config", None) is not None:
             ec = server.embodiment_config
             logger.info(
@@ -1223,6 +1249,7 @@ def create_app(
         try:
             yield
         finally:
+            set_server_up(0)
             await server.stop_batch_worker()
             # Flush + close JSONL recorder if armed
             _rec = getattr(server, "_recorder", None)
@@ -1266,12 +1293,32 @@ def create_app(
             vlm_loaded=getattr(server, "_vlm_loaded", False),
         )
 
+    @app.get("/metrics")
+    async def metrics():
+        """Prometheus scrape endpoint. No auth — operators network-isolate.
+        Returns text/plain with Prometheus expfmt v0.0.4 (or v1.0.0 from
+        prometheus_client 0.20+). Skipped via --disable-metrics flag (TBD)."""
+        from fastapi.responses import Response
+        return Response(
+            content=render_metrics(),
+            media_type=METRICS_CONTENT_TYPE,
+        )
+
     @app.post("/act")
     async def act(request: PredictRequest, _auth: None = Depends(_require_api_key)):
+        # Determine embodiment label for metrics. Bounded enum (per
+        # ORGANIZATION.md/cardinality budget): preset name OR 'custom'.
+        _ec = getattr(server, "embodiment_config", None)
+        _emb_label = getattr(_ec, "embodiment", None) or "custom"
+        _model_label = Path(server.export_dir).name or "unknown"
+
         # OTel span — no-op when [tracing] extra not installed.
         # Attribute namespace: gen_ai.* (OTel SemConv stable) for cross-tool
         # compatibility; reflex.* for VLA-specific extensions.
-        with _tracer.start_as_current_span("act") as span:
+        # Wrapped in track_in_flight so the in-flight gauge stays accurate
+        # even on exception or early return.
+        with track_in_flight(embodiment=_emb_label), \
+                _tracer.start_as_current_span("act") as span:
             span.set_attribute("gen_ai.operation.name", "act")
             span.set_attribute("gen_ai.request.model", str(server.export_dir))
             span.set_attribute(
@@ -1310,6 +1357,16 @@ def create_app(
                     span.set_attribute(
                         "reflex.inference_ms", float(result["latency_ms"])
                     )
+                    # Prometheus latency histogram (D.1.8 prometheus-grafana).
+                    # No-op when prometheus-client not installed.
+                    try:
+                        record_act_latency(
+                            float(result["latency_ms"]) / 1000.0,
+                            embodiment=_emb_label,
+                            model_id=_model_label,
+                        )
+                    except Exception:  # noqa: BLE001 — metrics never break /act
+                        pass
                 if "inference_mode" in result:
                     span.set_attribute(
                         "reflex.inference_mode", str(result["inference_mode"])
