@@ -123,6 +123,22 @@ class ActionChunkBuffer:
                 return None
             return self._buf[0].copy()
 
+    def peek_all(self) -> np.ndarray | None:
+        """Return a stacked snapshot of all buffered actions, or None if empty.
+
+        Read-only — does not modify the buffer. Used by RtcAdapter to
+        capture `prev_chunk_left_over` before `push_chunk(overwrite_stale=True)`
+        wipes the buffer for the new chunk.
+
+        Returns:
+            np.ndarray of shape (size, action_dim), or None if empty.
+            Always a copy — caller can mutate without affecting the buffer.
+        """
+        with self._lock:
+            if not self._buf:
+                return None
+            return np.stack(list(self._buf), axis=0).copy()
+
     def should_replan(self, threshold_ratio: float = 0.5) -> bool:
         """True when the buffer size has dropped to or below threshold.
 

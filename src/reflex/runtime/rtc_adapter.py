@@ -286,11 +286,11 @@ class RtcAdapter:
 
         # Step 3: call policy with RTC kwargs
         # `inference_delay` and `prev_chunk_left_over` are the lerobot
-        # RTC contract (see RTCProcessor.denoise_step). Day 2 always
-        # passes prev_chunk_left_over=None.
+        # RTC contract (see RTCProcessor.denoise_step). Day 3: carry
+        # forward the previous chunk's leftover so guidance has prefix.
         rtc_kwargs: dict[str, Any] = {
             "inference_delay": actions_consumed,
-            "prev_chunk_left_over": None,  # Day 3 wires carry-forward
+            "prev_chunk_left_over": self._prev_chunk_left_over,
         }
         if self.config.enabled:
             rtc_kwargs["execution_horizon"] = self.config.rtc_execution_horizon
@@ -321,13 +321,35 @@ class RtcAdapter:
     ) -> None:
         """Push the new chunk into the action buffer; record inference latency.
 
-        TODO(rtc): exact merge semantics depend on Part A.3 (normalized vs
-        processed guidance space). Implemented as pass-through for now.
+        Snapshots the buffer's current contents BEFORE push_chunk overwrites
+        them, stashes as ``self._prev_chunk_left_over`` for the NEXT
+        ``predict_chunk_with_rtc`` call. This is the carry-forward that
+        gives RTC its prefix guidance — the new chunk's first N actions
+        get pulled toward the previous chunk's unexecuted tail.
+
+        On the first chunk, the buffer is empty so the snapshot is None;
+        Day 2's "first-chunk-no-guidance" behavior is preserved.
+
+        actions: shape ``(T, action_dim)`` — already denormalized by the policy.
         """
+        # 1. Snapshot the previous chunk's leftover BEFORE we overwrite it.
+        #    push_chunk(overwrite_stale=True) wipes the buffer; capture first.
+        prev_leftover = self.buffer.peek_all()
+
+        # 2. Push the new chunk (replaces stale)
+        # buffer.push_chunk expects 2D; flatten batch dim if present
+        if actions.ndim == 3 and actions.shape[0] == 1:
+            chunk_2d = actions[0]
+        else:
+            chunk_2d = actions
+        self.buffer.push_chunk(chunk_2d)
+
+        # 3. Stash the snapshot for the NEXT predict call's guidance
+        self._prev_chunk_left_over = prev_leftover
+
+        # 4. Record latency + bump chunk count
         self.latency.record(elapsed_time)
         self._chunk_count += 1
-        # Pass-through — pending full implementation
-        self.buffer.push_chunk(actions)
 
     def reset(self, episode_id: str | None = None) -> None:
         """Reset RTC state at episode boundary.
