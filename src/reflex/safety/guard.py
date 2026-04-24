@@ -90,6 +90,42 @@ class SafetyLimits:
             effort_max=[50.0] * num_joints,
         )
 
+    @classmethod
+    def from_embodiment_config(cls, cfg: Any) -> SafetyLimits:
+        """Build SafetyLimits from a per-embodiment config (B.1 + B.6).
+
+        Maps `action_space.ranges` → position_min/max (per-axis joint limits)
+        and `constraints.max_ee_velocity` / `max_gripper_velocity` → velocity_max
+        (broadcast across joints; gripper dim gets the gripper velocity cap).
+
+        Effort/torque limits aren't in the embodiment config schema yet —
+        defaulted to 50 N·m per joint pending B.6 v2.
+        """
+        action_space = cfg.action_space
+        ranges = action_space["ranges"]
+        action_dim = int(action_space["dim"])
+        gripper_idx = cfg.gripper_idx
+        constraints = cfg.constraints
+
+        max_ee_vel = float(constraints["max_ee_velocity"])
+        max_gripper_vel = float(constraints["max_gripper_velocity"])
+
+        position_min = [float(r[0]) for r in ranges]
+        position_max = [float(r[1]) for r in ranges]
+        velocity_max = [
+            max_gripper_vel if i == gripper_idx else max_ee_vel
+            for i in range(action_dim)
+        ]
+        effort_max = [50.0] * action_dim  # default until B.6 v2 adds torque to schema
+
+        return cls(
+            joint_names=[f"joint_{i}" for i in range(action_dim)],
+            position_min=position_min,
+            position_max=position_max,
+            velocity_max=velocity_max,
+            effort_max=effort_max,
+        )
+
     def save(self, path: str | Path) -> None:
         Path(path).write_text(json.dumps(asdict(self), indent=2))
 
@@ -166,6 +202,17 @@ class ActionGuard:
     @classmethod
     def default(cls, num_joints: int = 6, **kwargs) -> ActionGuard:
         limits = SafetyLimits.default(num_joints)
+        return cls(limits=limits, **kwargs)
+
+    @classmethod
+    def from_embodiment_config(cls, cfg: Any, **kwargs) -> ActionGuard:
+        """Build an ActionGuard from a per-embodiment config (B.6).
+
+        The everyday safety path — uses the lightweight per-axis ranges +
+        velocity caps from configs/embodiments/*.json. No URDF required.
+        For the full URDF physics path, use from_urdf() instead.
+        """
+        limits = SafetyLimits.from_embodiment_config(cfg)
         return cls(limits=limits, **kwargs)
 
     def check_single(self, action: np.ndarray) -> SafetyCheckResult:

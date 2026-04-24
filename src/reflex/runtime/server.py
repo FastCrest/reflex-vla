@@ -1138,6 +1138,29 @@ def create_app(
     # getattr(server, 'embodiment_config', None).
     server.embodiment_config = embodiment_config
 
+    # Attach ActionGuard from embodiment config (B.6) — clamps actions
+    # against per-axis ranges + velocity caps before /act returns. Skips
+    # cleanly when embodiment_config is None (existing behavior preserved).
+    # Coexists with the URDF-based ActionGuard from `--safety-config` flag;
+    # the embodiment-config guard is always-on when configs are present,
+    # the URDF guard is opt-in for deeper physics checks.
+    server.embodiment_guard = None  # type: ignore[attr-defined]
+    if embodiment_config is not None:
+        try:
+            from reflex.safety.guard import ActionGuard
+            server.embodiment_guard = ActionGuard.from_embodiment_config(  # type: ignore[attr-defined]
+                embodiment_config, mode="clamp"
+            )
+            logger.info(
+                "Embodiment ActionGuard armed — %d joints, mode=clamp",
+                embodiment_config.action_dim,
+            )
+        except Exception as e:  # noqa: BLE001 — guard must never crash startup
+            logger.error(
+                "Embodiment ActionGuard init failed (continuing without): %s", e
+            )
+            server.embodiment_guard = None  # type: ignore[attr-defined]
+
     # Attach RTC adapter (B.3) if --rtc was passed. Day-1 scope: construct
     # the processor + latency tracker; body methods land Day 2-3 of the B.3
     # sprint. Stored on server.rtc_adapter for the /act handler to dispatch
@@ -1352,6 +1375,49 @@ def create_app(
                 instruction=request.instruction,
                 state=request.state,
             )
+            # Embodiment ActionGuard (B.6) — clamp actions against per-axis
+            # ranges + velocity caps from embodiment config. NaN/Inf zeroes
+            # the chunk + reports a violation. No-op when guard absent.
+            _eg = getattr(server, "embodiment_guard", None)
+            _guard_violations: list[str] = []
+            if (
+                _eg is not None
+                and isinstance(result, dict)
+                and "error" not in result
+                and isinstance(result.get("actions"), list)
+                and result["actions"]
+            ):
+                try:
+                    _arr = np.asarray(result["actions"], dtype=np.float32)
+                    _safe, _check_results = _eg.check(_arr)
+                    _was_modified = not np.array_equal(_arr, _safe)
+                    if _was_modified:
+                        result["actions"] = _safe.tolist()
+                        for _cr in _check_results:
+                            _guard_violations.extend(_cr.violations)
+                        # Prometheus counter — bucket by first-violation kind
+                        try:
+                            from reflex.observability import inc_safety_violation
+                            _kind = (
+                                "non_finite"
+                                if any("non_finite" in v for v in _guard_violations)
+                                else "joint_clamp"
+                            )
+                            inc_safety_violation(
+                                embodiment=_emb_label, kind=_kind
+                            )
+                        except Exception:  # noqa: BLE001
+                            pass
+                    if _guard_violations:
+                        result["guard_violations"] = _guard_violations[:20]  # cap log
+                        result["guard_clamped"] = True
+                        span.set_attribute(
+                            "reflex.guard.violation_count",
+                            len(_guard_violations),
+                        )
+                except Exception as e:  # noqa: BLE001 — guard must never break /act
+                    logger.warning("Embodiment ActionGuard failed: %s", e)
+
             if isinstance(result, dict):
                 if "latency_ms" in result:
                     span.set_attribute(
