@@ -668,6 +668,12 @@ goals:
     status: done
     weight: 8
 
+  - id: serve-model-zoo-cli
+    description: "`reflex models {list, pull, info}` — curated VLA registry browser/downloader. SHIPPED 2026-04-24. In-package registry (src/reflex/registry/data.py) with 5 seeded entries from public LeRobot weights (pi0-base, pi05-base, pi05-libero, smolvla-base, smolvla-libero). Filterable by family/device/embodiment. JSON + human Table output formats. `pull` calls huggingface_hub.snapshot_download into ~/.cache/reflex/models/<id>/. ModelEntry frozen dataclass with post_init validation guards (canonical family enum, kebab-case ids, positive action_dim). All seed entries require_export=True (raw PyTorch weights); CLI surfaces clear next-step hint pointing at `reflex export`. ~445 LoC + 245 LoC tests (36 tests). Plan ref: features/01_serve/subfeatures/_dx_gaps/model-zoo-cli.md."
+    check: "test -d src/reflex/registry && python -c 'from reflex.registry import REGISTRY, by_id; assert len(REGISTRY) >= 4 and by_id(\"pi05-base\") is not None' 2>/dev/null"
+    status: done
+    weight: 7
+
   - id: serve-prometheus-grafana
     description: "/metrics Prometheus endpoint + Grafana dashboard template (12 metrics: latency histogram, cache hit/miss counters, denoise steps, safety/SLO violations, fallback invocations, model swaps, in-flight gauge, episodes active, server up). SHIPPED 2026-04-24 (commit ad03d4b; +931 lines, 20 tests). Cardinality-bounded (90 series budget; source-grep test enforces no instruction/request_id/user_id/timestamp labels). dashboards/grafana_template.json schemaVersion 39 — 5 panels, templating vars for embodiment + model_id. /metrics route in server.py has no auth (operators network-isolate per plan). Downstream features (webhooks, slo-enforcement, guard, hot-swap) import from reflex.observability instead of defining their own metrics. Plan ref: features/01_serve/subfeatures/_ecosystem/prometheus-grafana_plan.md."
     check: "test -f src/reflex/observability/prometheus.py && test -f dashboards/grafana_template.json && python -c 'from reflex.observability import render_metrics; assert b\"reflex_act_latency_seconds\" in render_metrics()' 2>/dev/null"

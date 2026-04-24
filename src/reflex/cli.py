@@ -1808,6 +1808,226 @@ def validate_dataset(
         raise typer.Exit(exit_code)
 
 
+# `reflex models {list, pull, info}` — curated VLA registry browser/downloader.
+# Defined inline so the typer subgroup wiring stays visible at the CLI surface.
+models_app = typer.Typer(help="Browse + download Reflex-compatible VLA models from HuggingFace.")
+
+
+@models_app.command("list")
+def models_list(
+    family: str = typer.Option("", "--family", help="Filter by family: pi0/pi05/smolvla/openvla/groot"),
+    device: str = typer.Option("", "--device",
+                                help="Filter by supported device (orin_nano, agx_orin, thor, a10g, a100, h100, h200)"),
+    embodiment: str = typer.Option("", "--embodiment", help="Filter by supported embodiment (franka, so100, ur5)"),
+    output_format: str = typer.Option("human", "--format", help="'human' (table) or 'json'"),
+):
+    """List Reflex-compatible models from the curated registry.
+
+    Examples:
+      reflex models list
+      reflex models list --family pi05
+      reflex models list --device orin_nano
+      reflex models list --device a10g --embodiment franka
+    """
+    from reflex.registry import REGISTRY, filter_models
+
+    if output_format not in ("human", "json"):
+        console.print(f"[red]--format must be 'human' or 'json', got {output_format!r}[/red]")
+        raise typer.Exit(2)
+
+    entries = filter_models(
+        family=family or None, device=device or None, embodiment=embodiment or None,
+    )
+
+    if output_format == "json":
+        import json
+        rows = [
+            {
+                "model_id": e.model_id,
+                "hf_repo": e.hf_repo,
+                "family": e.family,
+                "action_dim": e.action_dim,
+                "size_mb": e.size_mb,
+                "supported_embodiments": list(e.supported_embodiments),
+                "supported_devices": list(e.supported_devices),
+                "requires_export": e.requires_export,
+                "license": e.license,
+                "description": e.description,
+            }
+            for e in entries
+        ]
+        typer.echo(json.dumps({"n": len(rows), "models": rows}, indent=2))
+        return
+
+    if not entries:
+        console.print(
+            f"[yellow]No models match filters (family={family or 'any'}, "
+            f"device={device or 'any'}, embodiment={embodiment or 'any'}).[/yellow]"
+        )
+        console.print(f"Registry has {len(REGISTRY)} entries total — drop filters to see all.")
+        return
+
+    table = Table(title=f"Reflex Model Registry ({len(entries)} of {len(REGISTRY)})")
+    table.add_column("model_id", style="cyan", no_wrap=True)
+    table.add_column("family", no_wrap=True)
+    table.add_column("a_dim", justify="right")
+    table.add_column("size", justify="right")
+    table.add_column("embodiments")
+    table.add_column("devices")
+    table.add_column("description")
+    for e in entries:
+        size_str = f"{e.size_mb / 1000:.1f}GB" if e.size_mb >= 1000 else f"{e.size_mb}MB"
+        table.add_row(
+            e.model_id, e.family, str(e.action_dim), size_str,
+            ", ".join(e.supported_embodiments), ", ".join(e.supported_devices),
+            e.description[:60] + ("..." if len(e.description) > 60 else ""),
+        )
+    console.print(table)
+    console.print(
+        "\n[dim]reflex models pull <model_id>   # download to ~/.cache/reflex/models/<id>[/dim]"
+        "\n[dim]reflex models info <model_id>   # see benchmarks + per-device support[/dim]"
+    )
+
+
+@models_app.command("pull")
+def models_pull(
+    model_id: str = typer.Argument(help="Registry id from `reflex models list`"),
+    target_dir: str = typer.Option("", "--target-dir",
+                                    help="Where to write weights. Default: ~/.cache/reflex/models/<model_id>/"),
+    no_verify: bool = typer.Option(False, "--no-verify",
+                                    help="Skip the post-download structure check"),
+    revision: str = typer.Option("", "--revision",
+                                  help="Override the registry's pinned hf_revision (advanced)"),
+):
+    """Download a model's weights from HuggingFace into the local cache.
+
+    Example:
+      reflex models pull pi05-libero
+      reflex models pull smolvla-base --target-dir /data/models/smolvla
+    """
+    from reflex.registry import by_id
+
+    entry = by_id(model_id)
+    if entry is None:
+        from reflex.registry import REGISTRY
+        available = sorted(e.model_id for e in REGISTRY)
+        console.print(f"[red]Unknown model_id: {model_id!r}[/red]")
+        console.print(f"Available: {', '.join(available)}")
+        raise typer.Exit(2)
+
+    target = Path(target_dir) if target_dir else (Path.home() / ".cache" / "reflex" / "models" / model_id)
+    target.mkdir(parents=True, exist_ok=True)
+
+    rev = revision or entry.hf_revision
+    rev_str = rev if rev else "HEAD (unpinned — consider --revision for reproducibility)"
+
+    console.print(f"Pulling [cyan]{entry.model_id}[/cyan]")
+    console.print(f"  hf_repo:  {entry.hf_repo}")
+    console.print(f"  revision: {rev_str}")
+    console.print(f"  size:     ~{entry.size_mb}MB")
+    console.print(f"  target:   {target}")
+
+    try:
+        from huggingface_hub import snapshot_download
+    except ImportError:
+        console.print("[red]huggingface_hub not installed. pip install reflex-vla[/red]")
+        raise typer.Exit(2)
+
+    try:
+        snapshot_download(
+            repo_id=entry.hf_repo,
+            revision=rev or None,
+            local_dir=str(target),
+            local_dir_use_symlinks=False,
+        )
+    except Exception as e:
+        console.print(f"[red]Download failed: {type(e).__name__}: {e}[/red]")
+        raise typer.Exit(1)
+
+    if not no_verify:
+        contents = sorted(p.name for p in target.iterdir())
+        console.print(f"[green]Pulled.[/green] {len(contents)} top-level entries: {contents[:10]}")
+        if entry.requires_export:
+            console.print(
+                f"\n[yellow]Next: this model ships as raw weights. Run "
+                f"[cyan]reflex export {target}[/cyan] to produce ONNX, then "
+                f"[cyan]reflex serve <export-dir>[/cyan].[/yellow]"
+            )
+        else:
+            console.print(
+                f"\n[green]Ready to serve:[/green] [cyan]reflex serve {target}[/cyan]"
+            )
+
+
+@models_app.command("info")
+def models_info(
+    model_id: str = typer.Argument(help="Registry id from `reflex models list`"),
+    output_format: str = typer.Option("human", "--format", help="'human' or 'json'"),
+):
+    """Show benchmarks + per-device support for a single model.
+
+    Example:
+      reflex models info pi05-libero
+    """
+    from reflex.registry import by_id
+
+    entry = by_id(model_id)
+    if entry is None:
+        console.print(f"[red]Unknown model_id: {model_id!r}[/red]")
+        raise typer.Exit(2)
+
+    if output_format == "json":
+        import json
+        body = {
+            "model_id": entry.model_id,
+            "hf_repo": entry.hf_repo,
+            "hf_revision": entry.hf_revision,
+            "family": entry.family,
+            "action_dim": entry.action_dim,
+            "size_mb": entry.size_mb,
+            "supported_embodiments": list(entry.supported_embodiments),
+            "supported_devices": list(entry.supported_devices),
+            "requires_export": entry.requires_export,
+            "license": entry.license,
+            "description": entry.description,
+            "benchmarks": [
+                {"device": b.device, "p50_ms": b.p50_ms, "p99_ms": b.p99_ms,
+                 "vram_mb": b.vram_mb, "measured_at": b.measured_at}
+                for b in entry.benchmarks
+            ],
+        }
+        typer.echo(json.dumps(body, indent=2))
+        return
+
+    console.print(f"[bold cyan]{entry.model_id}[/bold cyan] ([dim]{entry.hf_repo}[/dim])")
+    console.print(f"  family:        {entry.family}")
+    console.print(f"  action_dim:    {entry.action_dim}")
+    console.print(f"  size:          {entry.size_mb}MB")
+    console.print(f"  license:       {entry.license}")
+    console.print(f"  embodiments:   {', '.join(entry.supported_embodiments) or '(none)'}")
+    console.print(f"  devices:       {', '.join(entry.supported_devices) or '(none)'}")
+    console.print(f"  needs export:  {'YES — run reflex export after pull' if entry.requires_export else 'NO — Reflex-ready'}")
+    console.print(f"\n{entry.description}")
+
+    if entry.benchmarks:
+        bt = Table(title="Benchmarks")
+        bt.add_column("device")
+        bt.add_column("p50 (ms)", justify="right")
+        bt.add_column("p99 (ms)", justify="right")
+        bt.add_column("VRAM (MB)", justify="right")
+        bt.add_column("measured")
+        for b in entry.benchmarks:
+            bt.add_row(b.device, f"{b.p50_ms:.1f}", f"{b.p99_ms:.1f}",
+                       str(b.vram_mb), b.measured_at)
+        console.print()
+        console.print(bt)
+    else:
+        console.print("\n[dim]No benchmarks yet. Run [cyan]reflex bench <export>[/cyan] after pull.[/dim]")
+
+
+app.add_typer(models_app, name="models")
+
+
 # Register `reflex finetune` + `reflex distill` subcommands. Lazy-import
 # protects users who don't have training deps installed — they only break
 # if they run the commands themselves.
