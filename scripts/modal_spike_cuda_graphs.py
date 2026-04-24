@@ -25,9 +25,12 @@ onnx_output = modal.Volume.from_name("pi0-onnx-outputs", create_if_missing=False
 ONNX_OUT = "/onnx_out"
 
 image = (
-    # Use a base that already has cuBLAS + cuDNN. Mirrors modal_bench_path_b.py
-    # pattern which successfully runs ORT-CUDA on Modal A10G.
-    modal.Image.from_registry("nvidia/cuda:12.4.1-cudnn-runtime-ubuntu22.04", add_python="3.12")
+    # Use nvidia/cuda:12.5 base for cuBLAS / cuDNN availability that matches
+    # onnxruntime-gpu 1.20.1's expected runtime. A10G host driver version
+    # (separate from container CUDA libs) determines CUDA graph memory
+    # overhead per vLLM #5517 — probe modal_probe_a10g_driver.py if spike
+    # vlm_prefix OOMs to check driver version.
+    modal.Image.from_registry("nvidia/cuda:12.5.1-cudnn-runtime-ubuntu22.04", add_python="3.12")
     .apt_install("git")
     .pip_install(
         "torch==2.5.1",
@@ -35,7 +38,6 @@ image = (
         "numpy<2.0",
         "onnx>=1.16",
     )
-    # Make sure torch-bundled CUDA libs + system libs are on LD_LIBRARY_PATH
     .env({
         "LD_LIBRARY_PATH": "/usr/local/cuda/lib64:/usr/lib/x86_64-linux-gnu",
     })
@@ -45,7 +47,7 @@ image = (
 
 @app.function(
     image=image,
-    gpu="A10G",
+    gpu="A100-40GB",
     volumes={ONNX_OUT: onnx_output},
     timeout=600,
 )

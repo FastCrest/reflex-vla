@@ -93,7 +93,13 @@ def spike_one(model_path: Path, atol: float, name: str) -> dict:
     print(f"  Eager: {eager_ms:.1f} ms")
 
     # CUDA graph capture (first call) + replay (second call)
-    print("  Running with enable_cuda_graph=1...", flush=True)
+    # Minimal provider options — 2026-04-24 diagnostic spike confirmed that
+    # cudnn_conv_algo_search="HEURISTIC" + arena_extend_strategy="kSameAsRequested"
+    # selected non-deterministic conv algorithms that caused output divergence
+    # vs eager (max abs err 0.008, 79% mismatch at atol=1e-6). With minimal
+    # flags, vlm_prefix captured at perfect parity (cos=1.0, abs_max=0) on A100.
+    # Keep this list minimal unless a new diagnostic proves otherwise.
+    print("  Running with enable_cuda_graph=1 (minimal provider options)...", flush=True)
     cg_providers = [
         ("CUDAExecutionProvider", {"enable_cuda_graph": "1"}),
         "CPUExecutionProvider",
