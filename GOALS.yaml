@@ -611,8 +611,9 @@ goals:
     weight: 7
 
   - id: serve-action-denormalization-safety-net
-    description: "Per-embodiment velocity/torque/position clamping in the serve path. Currently action unnormalizer runs in LIBERO eval harness but NOT in serve — that's a real bug (academic labs trust Reflex to guard). ROUND-2 CRITICAL FINDING: must elevate from Phase 2.4 → Phase 0.5 as safety prerequisite. 2-3 days. Requires per-embodiment configs. Plan ref: serve_technical_plan_v3.md §1 + features/serve/action-denormalization.md."
-    check: "grep -q 'action_denormalize\\|velocity_clamp\\|_denormalize_action' src/reflex/runtime/server.py 2>/dev/null"
+    description: "Per-embodiment velocity/torque/position clamping in the serve path. SHIPPED 2026-04-24 (commit f20100e; +376 lines, 16 tests passing). Embodiment-config ActionGuard wired into /act handler — NaN/Inf zero-out + per-axis joint clamping + per-axis velocity caps. Reuses existing 331-line ActionGuard machinery via new from_embodiment_config classmethod (~50 LoC). Plan estimated 2-3 days; actual ~1 hr because existing ActionGuard already handled the hard parts. Day 3 LIBERO regression on Modal (~$1.50) deferred — re-cost when customer reports task-success degradation. effort_max defaults to 50 N·m per joint pending B.6 v2 schema extension (per-joint torque limits). Plan ref: features/01_serve/subfeatures/_rtc_a2c2/action-denormalization.md + _plan.md."
+    check: "grep -q 'embodiment_guard\\|ActionGuard.from_embodiment_config' src/reflex/runtime/server.py 2>/dev/null"
+    status: done
     weight: 7
 
   - id: serve-reflex-doctor
