@@ -154,7 +154,6 @@ to single-policy mode.[/red]
 
 ## What's NOT shipped Phase 1
 
-- **Per-slot PolicyRuntime queues** — chunk-budget-batching's `PolicyRuntime` queue + cost-weighted scheduler is currently single-slot ("prod"). In 2-policy mode, /act bypasses the queue and calls `predict_from_base64_async` per-server directly. Correctness preserved; batching optimization deferred until we observe queue contention in 2-policy customer deployments.
 - **Shadow inference** (`--shadow-policy`) — Phase 1.5; flag is accepted but logs an "inert" warning.
 - **Canary auto-promotion** — manual operator control over `--split` for now; Phase 2 wires automated ramp-up + rollback based on Prometheus signals.
 - **Cross-policy memory pooling** — each policy holds its own ONNX session + buffers; no shared workspace. Phase 2 explores `onnxruntime` IO-binding sharing.
@@ -167,6 +166,7 @@ to single-policy mode.[/red]
 - ✅ `X-Reflex-Policy-Slot` + `X-Reflex-Model-Version` + `X-Reflex-Routing-Key` + `X-Reflex-Routing-Degraded` response headers
 - ✅ Per-request `routing` block in record-replay JSONL trace
 - ✅ Per-slot `policy_slot` label on Prometheus `reflex_act_latency_seconds`
+- ✅ **Per-slot `PolicyRuntime` queue + cost-budget scheduler** (chunk-budget-batching benefit in 2-policy mode)
 - ✅ Refuse-to-load memory check fires before either ReflexServer loads
 - ✅ Setup failure in lifespan falls back to single-policy serve (logs error; never breaks `/health`)
 
