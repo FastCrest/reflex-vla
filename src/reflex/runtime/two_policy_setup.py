@@ -53,7 +53,7 @@ class TwoPolicyServingState:
     no_rtc_enforced: bool
 
 
-def setup_two_policy_serving(
+async def setup_two_policy_serving(
     *,
     export_a: str | Path,
     export_b: str | Path,
@@ -155,11 +155,17 @@ def setup_two_policy_serving(
     server_b = server_factory(export_dir=str(export_b_path), **server_kwargs)
 
     # ---- Build per-policy runtimes (one queue/scheduler per policy) ----
+    # runtime_factory may be sync OR async. Production wires PolicyRuntime
+    # which needs `await runtime.start()`; tests use sync stubs. Detect
+    # the return value type and await if it's a coroutine.
+    import inspect as _inspect
     runtime_a = None
     runtime_b = None
     if runtime_factory is not None:
-        runtime_a = runtime_factory(server=server_a, slot="a")
-        runtime_b = runtime_factory(server=server_b, slot="b")
+        _ra = runtime_factory(server=server_a, slot="a")
+        runtime_a = await _ra if _inspect.iscoroutine(_ra) else _ra
+        _rb = runtime_factory(server=server_b, slot="b")
+        runtime_b = await _rb if _inspect.iscoroutine(_rb) else _rb
 
     # ---- Compose Policy bundles for headers + record-replay ----
     policy_a = Policy(
@@ -182,8 +188,15 @@ def setup_two_policy_serving(
     )
 
     # ---- Build the dispatcher ----
-    # The predict callables route to the per-server async predict path.
+    # When a per-slot PolicyRuntime is provided, route /act through its
+    # bounded queue + cost-budget scheduler (chunk-budget-batching
+    # benefit per ADR 2026-04-24-chunk-budget-batching-architecture
+    # decision: per-policy queues land in the same refactor as
+    # policy-versioning). When runtime is None, fall back to the direct
+    # async predict path (correctness preserved; no batching benefit).
     async def _predict_a(request):
+        if runtime_a is not None:
+            return await runtime_a.submit(request)
         return await server_a.predict_from_base64_async(
             image_b64=request.image,
             instruction=request.instruction,
@@ -191,6 +204,8 @@ def setup_two_policy_serving(
         )
 
     async def _predict_b(request):
+        if runtime_b is not None:
+            return await runtime_b.submit(request)
         return await server_b.predict_from_base64_async(
             image_b64=request.image,
             instruction=request.instruction,

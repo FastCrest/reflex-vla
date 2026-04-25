@@ -81,40 +81,40 @@ def fake_export_b(tmp_path):
 def test_setup_rejects_no_rtc_false(fake_export_a, fake_export_b):
     """no_rtc=False must fail (per ADR: RTC carry-over is per-policy)."""
     with pytest.raises(ValueError, match="--no-rtc"):
-        setup_two_policy_serving(
+        asyncio.run(setup_two_policy_serving(
             export_a=fake_export_a, export_b=fake_export_b,
             no_rtc=False,
             server_factory=_make_server_factory(),
             skip_memory_check=True,
-        )
+        ))
 
 
 def test_setup_rejects_invalid_split(fake_export_a, fake_export_b):
     with pytest.raises(ValueError, match="split_a_percent"):
-        setup_two_policy_serving(
+        asyncio.run(setup_two_policy_serving(
             export_a=fake_export_a, export_b=fake_export_b,
             split_a_percent=150,
             server_factory=_make_server_factory(),
             skip_memory_check=True,
-        )
+        ))
 
 
 def test_setup_rejects_missing_export_a(tmp_path, fake_export_b):
     with pytest.raises(FileNotFoundError, match="--policy-a"):
-        setup_two_policy_serving(
+        asyncio.run(setup_two_policy_serving(
             export_a=tmp_path / "nope-a", export_b=fake_export_b,
             server_factory=_make_server_factory(),
             skip_memory_check=True,
-        )
+        ))
 
 
 def test_setup_rejects_missing_export_b(fake_export_a, tmp_path):
     with pytest.raises(FileNotFoundError, match="--policy-b"):
-        setup_two_policy_serving(
+        asyncio.run(setup_two_policy_serving(
             export_a=fake_export_a, export_b=tmp_path / "nope-b",
             server_factory=_make_server_factory(),
             skip_memory_check=True,
-        )
+        ))
 
 
 # ---------------------------------------------------------------------------
@@ -135,19 +135,19 @@ def test_setup_rejects_when_2x_memory_exceeds_safety(fake_export_a, fake_export_
     )
     # 2 * 8GB = 16GB > 0.7 * 16GB = 11.2GB -> fail
     with pytest.raises(ValueError, match="VRAM"):
-        setup_two_policy_serving(
+        asyncio.run(setup_two_policy_serving(
             export_a=fake_export_a, export_b=fake_export_b,
             server_factory=_make_server_factory(),
-        )
+        ))
 
 
 def test_setup_skip_memory_check_bypasses(fake_export_a, fake_export_b):
     """skip_memory_check=True bypasses the refuse-to-load check."""
-    state = setup_two_policy_serving(
+    state = asyncio.run(setup_two_policy_serving(
         export_a=fake_export_a, export_b=fake_export_b,
         server_factory=_make_server_factory(),
         skip_memory_check=True,
-    )
+    ))
     assert state.server_a.loaded
     assert state.server_b.loaded
 
@@ -163,10 +163,10 @@ def test_setup_proceeds_when_probes_return_zero(fake_export_a, fake_export_b, mo
         "reflex.runtime.two_policy_setup._probe_total_gpu_bytes",
         lambda: 0,
     )
-    state = setup_two_policy_serving(
+    state = asyncio.run(setup_two_policy_serving(
         export_a=fake_export_a, export_b=fake_export_b,
         server_factory=_make_server_factory(),
-    )
+    ))
     # Loaded successfully -- check was skipped
     assert state.server_a is not None
     assert state.server_b is not None
@@ -178,34 +178,34 @@ def test_setup_proceeds_when_probes_return_zero(fake_export_a, fake_export_b, mo
 
 
 def test_setup_loads_both_servers(fake_export_a, fake_export_b):
-    state = setup_two_policy_serving(
+    state = asyncio.run(setup_two_policy_serving(
         export_a=fake_export_a, export_b=fake_export_b,
         server_factory=_make_server_factory(),
         skip_memory_check=True,
-    )
+    ))
     assert state.server_a.loaded
     assert state.server_b.loaded
     assert state.server_a is not state.server_b  # distinct instances
 
 
 def test_setup_builds_dispatcher(fake_export_a, fake_export_b):
-    state = setup_two_policy_serving(
+    state = asyncio.run(setup_two_policy_serving(
         export_a=fake_export_a, export_b=fake_export_b,
         split_a_percent=80,
         server_factory=_make_server_factory(),
         skip_memory_check=True,
-    )
+    ))
     assert state.dispatcher is not None
     assert state.split_a_percent == 80
     assert state.dispatcher.split_a_percent == 80
 
 
 def test_setup_policy_bundles_carry_export_meta(fake_export_a, fake_export_b):
-    state = setup_two_policy_serving(
+    state = asyncio.run(setup_two_policy_serving(
         export_a=fake_export_a, export_b=fake_export_b,
         server_factory=_make_server_factory(),
         skip_memory_check=True,
-    )
+    ))
     assert state.policy_a.slot == "a"
     assert state.policy_b.slot == "b"
     assert state.policy_a.export_dir == str(fake_export_a)
@@ -217,11 +217,11 @@ def test_setup_policy_bundles_carry_export_meta(fake_export_a, fake_export_b):
 
 def test_setup_no_rtc_enforced_in_policy_bundles(fake_export_a, fake_export_b):
     """Per ADR: 2-policy mode forces rtc_adapter=None on both bundles."""
-    state = setup_two_policy_serving(
+    state = asyncio.run(setup_two_policy_serving(
         export_a=fake_export_a, export_b=fake_export_b,
         server_factory=_make_server_factory(),
         skip_memory_check=True,
-    )
+    ))
     assert state.policy_a.rtc_adapter is None
     assert state.policy_b.rtc_adapter is None
     assert state.no_rtc_enforced is True
@@ -229,11 +229,11 @@ def test_setup_no_rtc_enforced_in_policy_bundles(fake_export_a, fake_export_b):
 
 def test_setup_dispatcher_routes_to_correct_predict(fake_export_a, fake_export_b):
     """Wired predict_a/predict_b must hit the right server."""
-    state = setup_two_policy_serving(
+    state = asyncio.run(setup_two_policy_serving(
         export_a=fake_export_a, export_b=fake_export_b,
         server_factory=_make_server_factory(),
         skip_memory_check=True,
-    )
+    ))
 
     # Stub request shape (dataclass-like with image/instruction/state attrs)
     @dataclass
@@ -243,12 +243,12 @@ def test_setup_dispatcher_routes_to_correct_predict(fake_export_a, fake_export_b
         state: list[float] | None = None
 
     # Force routing to a specific slot by setting split=100 -> all to A
-    state2 = setup_two_policy_serving(
+    state2 = asyncio.run(setup_two_policy_serving(
         export_a=fake_export_a, export_b=fake_export_b,
         split_a_percent=100,
         server_factory=_make_server_factory(model_id="forced-a"),
         skip_memory_check=True,
-    )
+    ))
     result, decision = asyncio.run(state2.dispatcher.predict(
         request=_Req(), episode_id="ep_force_a", request_id="req_1",
     ))
@@ -265,12 +265,12 @@ def test_setup_runtime_factory_invoked_when_provided(fake_export_a, fake_export_
         runtime_calls.append({"slot": slot, "server": server})
         return f"runtime_for_{slot}"  # placeholder runtime
 
-    state = setup_two_policy_serving(
+    state = asyncio.run(setup_two_policy_serving(
         export_a=fake_export_a, export_b=fake_export_b,
         server_factory=_make_server_factory(),
         runtime_factory=_runtime_factory,
         skip_memory_check=True,
-    )
+    ))
     # Both slots got their own runtime built
     slots = [c["slot"] for c in runtime_calls]
     assert sorted(slots) == ["a", "b"]
@@ -283,11 +283,11 @@ def test_setup_runtime_factory_invoked_when_provided(fake_export_a, fake_export_
 def test_setup_default_runtime_factory_none_skips_runtimes(fake_export_a, fake_export_b):
     """When runtime_factory is None (default for tests/legacy backends),
     the runtime fields are None on the bundles."""
-    state = setup_two_policy_serving(
+    state = asyncio.run(setup_two_policy_serving(
         export_a=fake_export_a, export_b=fake_export_b,
         server_factory=_make_server_factory(),
         skip_memory_check=True,
-    )
+    ))
     assert state.runtime_a is None
     assert state.runtime_b is None
 

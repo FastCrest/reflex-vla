@@ -1562,17 +1562,69 @@ def create_app(
                 servers_pair["b"] = srv_b
                 return srv_b
 
+            # Per-slot PolicyRuntime queues. Each slot gets its own queue +
+            # cost-budget scheduler wrapping the per-server run_batch
+            # callback. Closes the chunk-budget-batching cross-cut into
+            # 2-policy mode (per chunk-budget-batching ADR decision: per-
+            # policy queues land in the same refactor as policy-versioning).
+            #
+            # Gated on `hasattr(server_per_slot, "run_batch")` -- only
+            # ReflexServer (the default decomposed backend) implements it.
+            # Other backends fall back to direct predict_from_base64_async
+            # (the dispatcher's predict closures handle this transparently).
+            from reflex.runtime.batching import (
+                CostBudgetScheduler as _CBS,
+                CostMode as _CM,
+                GpuMsCostModel as _GMCM,
+            )
+            from reflex.runtime.policy_runtime import PolicyRuntime as _PR
+
+            _per_slot_runtimes: list = []  # tracked for shutdown
+
+            async def _two_policy_runtime_factory(*, server: Any, slot: str):
+                if not hasattr(server, "run_batch"):
+                    return None
+                _ec_local = getattr(server, "embodiment_config", None)
+                _emb_local = getattr(_ec_local, "embodiment", None) or "custom"
+                _model_id_local = Path(server.export_dir).name or f"slot_{slot}"
+                _cm_local = _GMCM()
+                _sched_local = _CBS(
+                    max_cost_per_batch_ms=max_batch_cost_ms,
+                    cost_model=_cm_local,
+                    max_wait_ms=max(1.0, batch_timeout_ms),
+                    mode=_CM.PROFILED,
+                )
+
+                def _shape_key(_req):
+                    return "default"
+
+                runtime = _PR(
+                    policy_id=slot,
+                    model_id=_model_id_local,
+                    embodiment=_emb_local,
+                    scheduler=_sched_local,
+                    cost_model=_cm_local,
+                    run_batch_callback=server.run_batch,
+                    shape_key_fn=_shape_key,
+                    max_queue=1000,
+                )
+                await runtime.start()
+                _per_slot_runtimes.append(runtime)
+                logger.info(
+                    "two_policy.runtime_started slot=%s model=%s embodiment=%s",
+                    slot, _model_id_local, _emb_local,
+                )
+                return runtime
+
             try:
-                two_state = setup_two_policy_serving(
+                two_state = await setup_two_policy_serving(
                     export_a=server.export_dir,
                     export_b=policy_b_export_dir,
                     split_a_percent=policy_split_a_percent,
                     no_rtc=True,  # ADR-enforced; CLI also blocks otherwise
                     crash_threshold=policy_crash_threshold,
                     server_factory=_two_policy_server_factory,
-                    runtime_factory=None,  # Phase 1: no per-policy PolicyRuntime
-                                           # (would require server.run_batch
-                                           #  callbacks per slot; deferred).
+                    runtime_factory=_two_policy_runtime_factory,
                     # GPU-memory check uses the export-dir size estimator;
                     # can be skipped via env for tests / CPU-only runs.
                     skip_memory_check=bool(_os.environ.get(
@@ -1580,6 +1632,16 @@ def create_app(
                     )),
                 )
                 server.two_policy_state = two_state  # type: ignore[attr-defined]
+                # Stash per-slot runtimes on server so the lifespan
+                # finalizer can stop them cleanly.
+                server._two_policy_runtimes = _per_slot_runtimes  # type: ignore[attr-defined]
+                # Mirror into the legacy server.policies dict so existing
+                # diagnostics + tests that read server.policies see the
+                # right per-slot runtimes (instead of empty {}).
+                server.policies = {
+                    "a": two_state.runtime_a,
+                    "b": two_state.runtime_b,
+                }  # type: ignore[attr-defined]
                 logger.info(
                     "two_policy.serving_active split_a_percent=%d "
                     "crash_threshold=%d slot_a=%s slot_b=%s",
@@ -1662,6 +1724,15 @@ def create_app(
                     await _runtime.stop()
                 except Exception as exc:  # noqa: BLE001
                     logger.warning("policy_runtime.stop failed: %s", exc)
+            # Stop per-slot 2-policy runtimes (each is a PolicyRuntime
+            # built by _two_policy_runtime_factory in lifespan startup).
+            for _slot_runtime in getattr(server, "_two_policy_runtimes", []):
+                try:
+                    await _slot_runtime.stop()
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning(
+                        "two_policy_runtime.stop failed: %s", exc,
+                    )
             # Flush + close JSONL recorder if armed
             _rec = getattr(server, "_recorder", None)
             if _rec is not None:
