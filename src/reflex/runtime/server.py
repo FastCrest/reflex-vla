@@ -1940,12 +1940,21 @@ def create_app(
                         "reflex.inference_ms", float(result["latency_ms"])
                     )
                     # Prometheus latency histogram (D.1.8 prometheus-grafana).
-                    # No-op when prometheus-client not installed.
+                    # No-op when prometheus-client not installed. Day 6
+                    # policy-versioning: emit policy_slot label so
+                    # operators can split per-slot p99 in 2-policy mode.
+                    # Default "prod" preserves single-policy series.
                     try:
+                        _slot_label = (
+                            _two_routing_decision.slot
+                            if _two_routing_decision is not None
+                            else "prod"
+                        )
                         record_act_latency(
                             float(result["latency_ms"]) / 1000.0,
                             embodiment=_emb_label,
                             model_id=_model_label,
+                            policy_slot=_slot_label,
                         )
                     except Exception:  # noqa: BLE001 — metrics never break /act
                         pass
@@ -2032,6 +2041,19 @@ def create_app(
                     if "error" in result
                     else None
                 )
+                # Policy-versioning Day 7 schema: emit per-request
+                # `routing` block when 2-policy mode is active. v1
+                # readers ignore the unknown field per ADR additive
+                # evolution.
+                _routing_for_record: dict | None = None
+                if _two_routing_decision is not None:
+                    _routing_for_record = {
+                        "slot": _two_routing_decision.slot,
+                        "routing_key": _two_routing_decision.routing_key,
+                        "degraded": _two_routing_decision.degraded_routing,
+                        "cached": _two_routing_decision.cached,
+                        "crash_verdict": _two_routing_decision.crash_verdict,
+                    }
                 rec_seq = _rec.write_request(
                     chunk_id=_rec.seq,  # 1:1 with seq for non-batched serve
                     image_b64=request.image,
@@ -2042,6 +2064,7 @@ def create_app(
                     latency_total_ms=latency_total,
                     mode=str(result.get("inference_mode", "")),
                     error=err,
+                    routing=_routing_for_record,
                 )
                 if rec_seq >= 0:
                     span.set_attribute("reflex.record.seq", rec_seq)
@@ -2086,7 +2109,31 @@ def create_app(
                         "calibration_warmup.record_or_persist_failed: %s", exc,
                     )
 
-            return JSONResponse(content=result)
+            # Policy-versioning Days 9-10: emit X-Reflex-* headers + slot
+            # tracking when 2-policy mode is active. Single-policy mode is
+            # unchanged (headers omitted; existing customers/dashboards
+            # don't depend on them).
+            _resp_headers: dict[str, str] = {}
+            if _two_routing_decision is not None:
+                _two_state_local = getattr(server, "two_policy_state", None)
+                if _two_state_local is not None:
+                    _slot = _two_routing_decision.slot
+                    _slot_policy = (
+                        _two_state_local.policy_a
+                        if _slot == "a"
+                        else _two_state_local.policy_b
+                    )
+                    _resp_headers["X-Reflex-Policy-Slot"] = _slot
+                    _resp_headers["X-Reflex-Model-Version"] = (
+                        _slot_policy.model_version
+                    )
+                    _resp_headers["X-Reflex-Routing-Key"] = (
+                        _two_routing_decision.routing_key[:128]
+                    )
+                    if _two_routing_decision.degraded_routing:
+                        _resp_headers["X-Reflex-Routing-Degraded"] = "true"
+
+            return JSONResponse(content=result, headers=_resp_headers)
 
     @app.get("/config")
     async def config(_auth: None = Depends(_require_api_key)):
