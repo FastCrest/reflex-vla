@@ -463,3 +463,16 @@ class SmolVLANativeServer:
         return self.predict_from_base64(
             image_b64=image_b64, instruction=instruction, state=state
         )
+
+    async def run_batch(self, requests: list) -> list[dict[str, Any]]:
+        """PolicyRuntime entry point. Sequential dispatch — native PyTorch
+        path doesn't batch today. Per chunk-budget-batching ADR 2026-04-24."""
+        results: list[dict[str, Any]] = []
+        for req in requests:
+            res = await self.predict_from_base64_async(
+                image_b64=getattr(req, "image", None),
+                instruction=getattr(req, "instruction", "") or "",
+                state=getattr(req, "state", None),
+            )
+            results.append(res)
+        return results

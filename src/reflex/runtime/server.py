@@ -999,6 +999,31 @@ class ReflexServer:
 
         return await self.predict_async(image=image, instruction=instruction, state=state)
 
+    async def run_batch(self, requests: list) -> list[dict[str, Any]]:
+        """The PolicyRuntime's run_batch_callback. Takes a list of PredictRequest
+        objects and returns a list of result dicts, one per request, in order.
+
+        Phase 1: sequential dispatch via ``predict_from_base64_async`` per request.
+        The decomposed ONNX exports are static-shape (per ADR 2026-04-21) so
+        true batched dispatch (single ORT call with batch_dim=N) requires a
+        future ``dynamic-batch-shapes`` feature. Today the queue + scheduler
+        + per-policy isolation primitive lands without changing per-request
+        compute cost.
+
+        Per chunk-budget-batching ADR 2026-04-24, this is the entry point the
+        ``PolicyRuntime`` worker calls once per scheduler-decided flush. The
+        runtime fans the returned list back to the per-request awaiting futures.
+        """
+        results: list[dict[str, Any]] = []
+        for req in requests:
+            res = await self.predict_from_base64_async(
+                image_b64=getattr(req, "image", None),
+                instruction=getattr(req, "instruction", "") or "",
+                state=getattr(req, "state", None),
+            )
+            results.append(res)
+        return results
+
 
 try:
     from pydantic import BaseModel
@@ -1032,6 +1057,7 @@ def create_app(
     deadline_ms: float | None = None,
     max_batch: int = 1,
     batch_timeout_ms: float = 5.0,
+    max_batch_cost_ms: float = 100.0,  # PolicyRuntime budget per chunk-budget-batching ADR
     api_key: str | None = None,
     replan_hz: float | None = None,
     execute_hz: float | None = None,
@@ -1379,12 +1405,71 @@ def create_app(
                 "to JIT the engine. /health returns 200 immediately."
             )
 
-        await server.start_batch_worker()
+        # PolicyRuntime — per-policy queue + cost-weighted scheduler (Phase 1
+        # chunk-budget-batching). Single-policy default key "prod"; multi-policy
+        # via policy-versioning lands {"a": ..., "b": ...} on the same dict.
+        # Per ADR 2026-04-24-chunk-budget-batching-architecture.
+        #
+        # Gated on `hasattr(server, "run_batch")` — only ReflexServer (the
+        # default decomposed backend) implements it for now. Other backends
+        # (SmolVLANativeServer, Pi0OnnxServer, SmolVLAOnnxServer) take the
+        # /act fallback path (direct predict_from_base64_async) until they
+        # ship their own run_batch. No-op for the legacy batching path.
+        _runtime = None
+        if hasattr(server, "run_batch"):
+            from reflex.runtime.batching import (
+                CostBudgetScheduler, CostMode, GpuMsCostModel,
+            )
+            from reflex.runtime.policy_runtime import PolicyRuntime
+            _ec = getattr(server, "embodiment_config", None)
+            _emb = getattr(_ec, "embodiment", None) or "custom"
+            _model_id = Path(server.export_dir).name or "unknown"
+            _cost_model = GpuMsCostModel()
+            _scheduler = CostBudgetScheduler(
+                max_cost_per_batch_ms=max_batch_cost_ms,
+                cost_model=_cost_model,
+                max_wait_ms=max(1.0, batch_timeout_ms),
+                mode=CostMode.PROFILED,
+            )
+
+            def _shape_key_fn(req):
+                # Phase 1 single-embodiment-per-process collapses to a constant.
+                # Phase 2 per-embodiment routing extends this.
+                return "default"
+
+            _runtime = PolicyRuntime(
+                policy_id="prod",
+                model_id=_model_id,
+                embodiment=_emb,
+                scheduler=_scheduler,
+                cost_model=_cost_model,
+                run_batch_callback=server.run_batch,
+                shape_key_fn=_shape_key_fn,
+                max_queue=1000,
+            )
+            await _runtime.start()
+            server.policies = {"prod": _runtime}  # type: ignore[attr-defined]
+            logger.info(
+                "policy_runtime started: policy_id=prod, max_cost_ms=%.1f, "
+                "max_wait_ms=%.1f, embodiment=%s, model=%s",
+                max_batch_cost_ms, max(1.0, batch_timeout_ms), _emb, _model_id,
+            )
+        else:
+            server.policies = {}  # type: ignore[attr-defined]
+            logger.info(
+                "policy_runtime skipped: backend %s lacks run_batch — /act "
+                "uses direct predict_from_base64_async path",
+                type(server).__name__,
+            )
         try:
             yield
         finally:
             set_server_up(0)
-            await server.stop_batch_worker()
+            if _runtime is not None:
+                try:
+                    await _runtime.stop()
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning("policy_runtime.stop failed: %s", exc)
             # Flush + close JSONL recorder if armed
             _rec = getattr(server, "_recorder", None)
             if _rec is not None:
@@ -1524,11 +1609,33 @@ def create_app(
                 span.set_attribute("reflex.rtc.episode_id", request.episode_id)
 
             try:
-                result = await server.predict_from_base64_async(
-                    image_b64=request.image,
-                    instruction=request.instruction,
-                    state=request.state,
-                )
+                # Route through the per-policy runtime queue (chunk-budget-
+                # batching Phase 1). Single-policy default slot is "prod";
+                # policy-versioning later routes via PolicyRouter to "a"/"b".
+                from reflex.runtime.policy_runtime import QueueFull as _PRQueueFull
+                _runtime = getattr(server, "policies", {}).get("prod")
+                if _runtime is None:
+                    # Fallback for backends/tests that don't install a runtime —
+                    # call the per-request path directly.
+                    result = await server.predict_from_base64_async(
+                        image_b64=request.image,
+                        instruction=request.instruction,
+                        state=request.state,
+                    )
+                else:
+                    try:
+                        result = await _runtime.submit(request)
+                    except _PRQueueFull:
+                        return JSONResponse(
+                            status_code=503,
+                            content={
+                                "error": "queue_full",
+                                "message": "policy runtime queue at capacity",
+                                "policy_id": "prod",
+                                "max_queue": _runtime.snapshot().get("max_queue"),
+                            },
+                            headers={"Retry-After": "1"},
+                        )
             except Exception as _predict_exc:  # noqa: BLE001
                 # Circuit-breaker increment on raw exception. Re-raise so
                 # FastAPI returns 500; subsequent calls hit the degraded

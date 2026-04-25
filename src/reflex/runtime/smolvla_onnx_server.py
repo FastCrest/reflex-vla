@@ -244,3 +244,18 @@ class SmolVLAOnnxServer:
 
     async def stop_batch_worker(self) -> None:
         return None
+
+    async def run_batch(self, requests: list) -> list[dict[str, Any]]:
+        """PolicyRuntime entry point. Sequential dispatch per request — the
+        queue + scheduler primitive lands without changing per-request
+        compute (monolithic exports are static-shape; dynamic-batch is a
+        future feature). Per chunk-budget-batching ADR 2026-04-24."""
+        results: list[dict[str, Any]] = []
+        for req in requests:
+            res = await self.predict_from_base64_async(
+                image_b64=getattr(req, "image", None),
+                instruction=getattr(req, "instruction", "") or "",
+                state=getattr(req, "state", None),
+            )
+            results.append(res)
+        return results
