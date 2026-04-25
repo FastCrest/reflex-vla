@@ -177,14 +177,74 @@ class TestCrossValidation:
         assert any(e["slug"] == "gripper-idx-out-of-range" for e in errors)
 
     def test_rtc_horizon_too_short_warns(self):
+        """Per ADR 2026-04-25 decision #8, rtc_execution_horizon is now an
+        INTEGER COUNT of actions. Below 1 = degenerate RTC."""
         d = EmbodimentConfig.load_preset("franka").to_dict()
-        d["control"]["frequency_hz"] = 1.0
-        d["control"]["rtc_execution_horizon"] = 0.1  # 1 * 0.1 = 0.1 < 1 step
+        d["control"]["rtc_execution_horizon"] = 0  # 0 actions = degenerate
         cfg = EmbodimentConfig.from_dict(d)
         errors = validate_cross_field(cfg)
         warnings = [e for e in errors if e["slug"] == "rtc-horizon-too-short"]
         assert len(warnings) == 1
-        assert warnings[0]["severity"] == "warn"  # warn, not error
+        assert warnings[0]["severity"] == "warn"
+
+    def test_rtc_horizon_exceeds_chunk_warns(self):
+        """horizon > chunk_size makes no sense (can't lock more actions than
+        the chunk holds)."""
+        d = EmbodimentConfig.load_preset("franka").to_dict()
+        d["control"]["chunk_size"] = 50
+        d["control"]["rtc_execution_horizon"] = 100  # > chunk_size
+        cfg = EmbodimentConfig.from_dict(d)
+        errors = validate_cross_field(cfg)
+        warnings = [e for e in errors if e["slug"] == "rtc-horizon-exceeds-chunk"]
+        assert len(warnings) == 1
+
+    def test_rtc_horizon_fractional_value_auto_migrates_to_integer(self):
+        """Per ADR 2026-04-25 decision #8: legacy fractional values
+        (0 < value < 1) auto-convert to int(value * chunk_size) at load
+        time + emit a one-time deprecation warning. Integer-only after
+        migration."""
+        d = EmbodimentConfig.load_preset("franka").to_dict()
+        d["control"]["chunk_size"] = 50
+        d["control"]["rtc_execution_horizon"] = 0.5  # legacy fraction
+        cfg = EmbodimentConfig.from_dict(d)
+        # 0.5 * 50 = 25 (integer count after migration)
+        assert cfg.control["rtc_execution_horizon"] == 25
+        # And it should pass validation cleanly (no degenerate warning)
+        errors = validate_cross_field(cfg)
+        assert not any(
+            e["slug"] in ("rtc-horizon-too-short", "rtc-horizon-exceeds-chunk")
+            for e in errors
+        )
+
+    def test_rtc_horizon_integer_passthrough_no_migration(self):
+        """Integer values pass through unchanged."""
+        d = EmbodimentConfig.load_preset("franka").to_dict()
+        d["control"]["chunk_size"] = 50
+        d["control"]["rtc_execution_horizon"] = 25
+        cfg = EmbodimentConfig.from_dict(d)
+        assert cfg.control["rtc_execution_horizon"] == 25
+
+    def test_rtc_horizon_migration_emits_deprecation_warning(self, caplog):
+        """First fractional load logs a warning; second load of same config
+        is silenced (one-time-per-(source, embodiment) dedup)."""
+        import logging
+        from reflex.embodiments import _RTC_HORIZON_MIGRATION_WARNED
+        # Reset the dedup set for the test
+        _RTC_HORIZON_MIGRATION_WARNED.clear()
+
+        caplog.set_level(logging.WARNING)
+        d = EmbodimentConfig.load_preset("franka").to_dict()
+        d["control"]["chunk_size"] = 50
+        d["control"]["rtc_execution_horizon"] = 0.5
+        # First load emits warning
+        EmbodimentConfig.from_dict(d, source_path="/test/franka.json")
+        first_warnings = [r for r in caplog.records if "fraction" in r.message]
+        assert len(first_warnings) >= 1
+        # Second load with same source + embodiment: silenced
+        caplog.clear()
+        EmbodimentConfig.from_dict(d, source_path="/test/franka.json")
+        second_warnings = [r for r in caplog.records if "fraction" in r.message]
+        assert len(second_warnings) == 0
 
     def test_duplicate_camera_name_caught(self):
         d = EmbodimentConfig.load_preset("franka").to_dict()

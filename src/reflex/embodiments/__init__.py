@@ -17,9 +17,40 @@ Plan: features/01_serve/subfeatures/_rtc_a2c2/per-embodiment-configs_plan.md
 from __future__ import annotations
 
 import json
+import logging
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
+
+logger = logging.getLogger(__name__)
+
+# Tracks which (source_path, embodiment) pairs have already emitted the
+# rtc_execution_horizon migration warning, so we don't spam the operator
+# on repeated loads.
+_RTC_HORIZON_MIGRATION_WARNED: set[tuple[str, str]] = set()
+
+
+def _warn_rtc_horizon_migration(
+    *,
+    source_path: str,
+    embodiment: str,
+    old_value: float,
+    chunk_size: int,
+    new_value: int,
+) -> None:
+    """One-time-per-(source, embodiment) deprecation warning for the
+    fractional → integer rtc_execution_horizon migration."""
+    key = (source_path, embodiment)
+    if key in _RTC_HORIZON_MIGRATION_WARNED:
+        return
+    _RTC_HORIZON_MIGRATION_WARNED.add(key)
+    logger.warning(
+        "[deprecated] embodiment %s at %s stores rtc_execution_horizon as "
+        "a fraction (%s) — converted to integer count %d via chunk_size=%d. "
+        "Update the JSON to integer count to silence this warning. Schema "
+        "v2 will reject fractional values.",
+        embodiment, source_path or "(in-memory)", old_value, new_value, chunk_size,
+    )
 
 # Repo-relative path to preset JSONs. Relative to the repo root, NOT this
 # file (the JSONs live under configs/embodiments/, outside the package).
@@ -50,7 +81,30 @@ class EmbodimentConfig:
     @classmethod
     def from_dict(cls, d: dict[str, Any], source_path: str = "") -> EmbodimentConfig:
         """Construct from a parsed JSON dict. Doesn't validate — call validate()
-        separately if you want to know if it's well-formed."""
+        separately if you want to know if it's well-formed.
+
+        Migration (auto-calibration Day 6, per ADR 2026-04-25): the legacy
+        `control.rtc_execution_horizon` field was historically stored as a
+        fraction of `chunk_size` (e.g. 0.5 = half the chunk). The runtime
+        code (rtc_adapter.RtcAdapterConfig) treats it as an integer COUNT
+        of actions. Migrate fractional values silently AND emit a one-time
+        deprecation warning so customers update their JSON to integer counts.
+        """
+        control = dict(d["control"])  # don't mutate the caller's dict
+        horizon = control.get("rtc_execution_horizon")
+        chunk_size = control.get("chunk_size", 0)
+        if (
+            horizon is not None
+            and isinstance(horizon, (int, float))
+            and 0 < horizon < 1.0
+            and chunk_size >= 1
+        ):
+            converted = max(1, int(round(horizon * chunk_size)))
+            _warn_rtc_horizon_migration(
+                source_path=source_path, embodiment=d.get("embodiment", "?"),
+                old_value=horizon, chunk_size=chunk_size, new_value=converted,
+            )
+            control["rtc_execution_horizon"] = converted
         return cls(
             schema_version=d["schema_version"],
             embodiment=d["embodiment"],
@@ -58,7 +112,7 @@ class EmbodimentConfig:
             normalization=d["normalization"],
             gripper=d["gripper"],
             cameras=d["cameras"],
-            control=d["control"],
+            control=control,
             constraints=d["constraints"],
             _source_path=source_path,
         )

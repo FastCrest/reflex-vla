@@ -160,19 +160,35 @@ def validate_cross_field(cfg: EmbodimentConfig) -> list[ValidationError]:
             }
         )
 
-    # control.frequency_hz × control.rtc_execution_horizon must be ≥ 1
-    # (otherwise the horizon is shorter than one control step — RTC degenerate)
-    freq = cfg.control.get("frequency_hz", 0)
+    # control.rtc_execution_horizon is an INTEGER count of actions (per
+    # ADR 2026-04-25-auto-calibration-architecture decision #8 — the legacy
+    # fractional form is auto-migrated by EmbodimentConfig.from_dict). The
+    # horizon must be at least one action (RTC degenerate below that) AND
+    # at most chunk_size (can't lock more actions than the chunk holds).
     horizon = cfg.control.get("rtc_execution_horizon", 0)
-    if freq * horizon < 1:
+    chunk_size = cfg.control.get("chunk_size", 0)
+    if horizon < 1:
         errors.append(
             {
                 "slug": "rtc-horizon-too-short",
                 "severity": "warn",
                 "field": "control.rtc_execution_horizon",
                 "message": (
-                    f"frequency_hz × rtc_execution_horizon = {freq * horizon:.2f} "
-                    f"< 1 step; RTC will degenerate"
+                    f"rtc_execution_horizon = {horizon} < 1 action; "
+                    f"RTC will degenerate. Set to an integer count of "
+                    f"actions to lock during replan."
+                ),
+            }
+        )
+    elif chunk_size and horizon > chunk_size:
+        errors.append(
+            {
+                "slug": "rtc-horizon-exceeds-chunk",
+                "severity": "warn",
+                "field": "control.rtc_execution_horizon",
+                "message": (
+                    f"rtc_execution_horizon = {horizon} exceeds chunk_size "
+                    f"= {chunk_size}; horizon caps at chunk_size in practice."
                 ),
             }
         )
