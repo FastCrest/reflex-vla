@@ -29,6 +29,14 @@ from reflex.pro.distill_scheduler import (
     SchedulerConfig,
     SchedulerState,
 )
+from reflex.pro.eval_gate import (
+    EvalGate,
+    EvalReport,
+    EvalSample,
+    GateResult,
+    GateThresholds,
+    InsufficientEpisodes,
+)
 from reflex.pro.license import (
     HardwareFingerprintLite,
     LicenseCorrupt,
@@ -47,7 +55,13 @@ __all__ = [
     "ConsentReceipt",
     "ConsentRequired",
     "DistillScheduler",
+    "EvalGate",
+    "EvalReport",
+    "EvalSample",
+    "GateResult",
+    "GateThresholds",
     "HardwareFingerprintLite",
+    "InsufficientEpisodes",
     "KickDecision",
     "LicenseCorrupt",
     "LicenseError",
