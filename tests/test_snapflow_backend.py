@@ -364,6 +364,10 @@ class TestBuildVelocityAdapters:
 
 class TestSaveCheckpoint:
     def test_writes_pretrained_model_dir(self, tmp_path):
+        """config.json must stay canonical (no `_reflex_*` pollution).
+        Caught by 2026-04-25 distill smoke v3 + v5: PI05Config strict-
+        decode rejects unknown fields. Reflex distill metadata lives in
+        distill_provenance.json (separate test below)."""
         fake = MagicMock()
         def save(path):
             Path(path).mkdir(parents=True, exist_ok=True)
@@ -373,13 +377,15 @@ class TestSaveCheckpoint:
 
         ckpt = _save_student_checkpoint(
             fake, tmp_path / "training" / "checkpoints", step=100,
-            teacher_config={"type": "pi0"},
         )
         assert ckpt == tmp_path / "training" / "checkpoints" / "00000100" / "pretrained_model"
         assert (ckpt / "model.safetensors").exists()
         cfg = json.loads((ckpt / "config.json").read_text())
-        assert cfg["_reflex_distill_method"] == "snapflow"
-        assert cfg["_reflex_distill_teacher_type"] == "pi0"
+        # Canonical type field preserved
+        assert cfg["type"] == "pi0"
+        # No reflex-distill pollution -- they would break PI05Config strict-decode
+        assert "_reflex_distill_method" not in cfg
+        assert "_reflex_distill_teacher_type" not in cfg
 
 
 class TestWriteProvenance:

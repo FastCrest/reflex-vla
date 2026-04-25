@@ -381,7 +381,7 @@ class SnapFlowBackend:
 
                 if step % checkpoint_every == 0 or step == cfg.num_steps:
                     last_ckpt = _save_student_checkpoint(
-                        student, checkpoint_root, step, teacher_config=loaded.config,
+                        student, checkpoint_root, step,
                     )
                     ctx.hooks.run(
                         "on_checkpoint", ctx, step=step, ckpt_path=last_ckpt,
@@ -395,7 +395,7 @@ class SnapFlowBackend:
         # ---- 8. Ensure we have a final checkpoint -------------------------
         if last_ckpt is None:
             last_ckpt = _save_student_checkpoint(
-                student, checkpoint_root, step or 0, teacher_config=loaded.config,
+                student, checkpoint_root, step or 0,
             )
 
         # ---- 9. Provenance stamp ------------------------------------------
@@ -887,16 +887,18 @@ def _save_student_checkpoint(
     student: Any,
     checkpoint_root: Path,
     step: int,
-    *,
-    teacher_config: dict,
 ) -> Path:
     """Save the student under the standard lerobot pretrained_model/
     layout so `_auto_export` can consume it unchanged.
 
     Directory: <root>/<step:08d>/pretrained_model/
-      ├── config.json           (inherited from teacher + distill tag)
+      ├── config.json           (canonical; written by save_pretrained)
       ├── model.safetensors     (student's full weights)
       └── distill_provenance.json  (added by _write_provenance)
+
+    config.json carries the canonical lerobot `type` field; reflex
+    distill metadata lives in distill_provenance.json (NOT polluting
+    config.json -- breaks PI05Config strict-decode at export time).
     """
     ckpt_dir = checkpoint_root / f"{step:08d}" / "pretrained_model"
     ckpt_dir.mkdir(parents=True, exist_ok=True)
@@ -910,16 +912,15 @@ def _save_student_checkpoint(
         )
     save_fn(str(ckpt_dir))
 
-    # Stamp the config with a distill marker so downstream consumers
-    # (export, VERIFICATION.md) know this came from SnapFlow.
-    config_path = ckpt_dir / "config.json"
-    if config_path.exists():
-        with config_path.open() as f:
-            cfg = json.load(f)
-        cfg["_reflex_distill_method"] = "snapflow"
-        cfg["_reflex_distill_teacher_type"] = teacher_config.get("type", "unknown")
-        with config_path.open("w") as f:
-            json.dump(cfg, f, indent=2)
+    # Reflex distill metadata is written to distill_provenance.json
+    # (see _write_provenance below), NOT to config.json. Polluting the
+    # canonical lerobot/HF config.json with `_reflex_*` fields breaks
+    # PI05Config / PI0Config strict-decode at load time -- caught by
+    # 2026-04-25 distill smoke v3 + v5 (reflex_context experiments).
+    # snapflow_pi0_model.py:_pick_policy_class still falls back to
+    # `_reflex_distill_teacher_type` for back-compat with old
+    # checkpoints, but new SnapFlow checkpoints use the canonical
+    # `type` field already written by save_pretrained.
 
     logger.info("[snapflow] checkpoint saved: %s", ckpt_dir)
     return ckpt_dir
