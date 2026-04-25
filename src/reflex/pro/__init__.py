@@ -37,6 +37,15 @@ from reflex.pro.eval_gate import (
     GateThresholds,
     InsufficientEpisodes,
 )
+from reflex.pro.post_swap_monitor import (
+    MonitorConfig,
+    PostSwapMonitor,
+    TripDecision,
+)
+from reflex.pro.rollback import (
+    RollbackHandler,
+    RollbackOutcome,
+)
 from reflex.pro.license import (
     HardwareFingerprintLite,
     LicenseCorrupt,
@@ -69,12 +78,17 @@ __all__ = [
     "LicenseHardwareMismatch",
     "LicenseHeartbeatStale",
     "LicenseMissing",
+    "MonitorConfig",
     "PIIOptions",
+    "PostSwapMonitor",
     "ProConsent",
     "ProDataCollector",
     "ProLicense",
+    "RollbackHandler",
+    "RollbackOutcome",
     "SchedulerConfig",
     "SchedulerState",
+    "TripDecision",
     "issue_dev_license",
     "load_license",
 ]
