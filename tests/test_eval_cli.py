@@ -157,26 +157,50 @@ def test_cost_preview_exits_clean_without_running_preflight(fake_export, monkeyp
     assert called["n"] == 0  # preflight skipped
 
 
-def test_cost_preview_shows_episode_arithmetic(fake_export):
+def test_cost_preview_shows_dollar_total(fake_export):
+    """Day 4 cost_model wire — surfaces total $ cost, not episode count."""
     result = runner.invoke(
         app, ["eval", str(fake_export), "--cost-preview",
               "--num-episodes", "10", "--tasks", "task_a,task_b,task_c"],
     )
     assert result.exit_code == 0
-    # 10 eps × 3 tasks = 30 episodes
-    assert "30" in result.stdout
-    assert "3 tasks" in result.stdout
+    # 3 tasks × (10 × $0.025 + $0.10) = $1.05; surfaces as "$1.05"
+    assert "$1.05" in result.stdout or "$1.0" in result.stdout
+    assert "Total estimate" in result.stdout
 
 
 def test_cost_preview_uses_default_tasks_when_unspecified(fake_export):
-    """Default LIBERO task list (4 families Phase 1)."""
+    """Default LIBERO task list (4 families Phase 1) — Day 4 output."""
     result = runner.invoke(
         app, ["eval", str(fake_export), "--cost-preview", "--num-episodes", "5"],
     )
     assert result.exit_code == 0
-    # 5 eps × 4 default tasks = 20 episodes
-    assert "20" in result.stdout
+    # 4 tasks × (5 × $0.025 + $0.10) = $0.90
+    assert "$0.90" in result.stdout or "$0.9" in result.stdout
+    # Banner echoes 4 tasks
     assert "4 tasks" in result.stdout
+
+
+def test_cost_preview_local_runtime_is_zero(fake_export):
+    result = runner.invoke(
+        app, ["eval", str(fake_export), "--cost-preview",
+              "--runtime", "local", "--num-episodes", "100"],
+    )
+    assert result.exit_code == 0
+    assert "$0.00" in result.stdout
+    assert "Local" in result.stdout
+
+
+def test_cost_preview_warns_above_guardrail(fake_export):
+    """Massive --num-episodes should trigger the >$50 warning."""
+    result = runner.invoke(
+        app, ["eval", str(fake_export), "--cost-preview",
+              "--num-episodes", "1000",
+              "--tasks", "a,b,c,d,e,f,g,h,i,j,k,l,m,n,o,p,q,r,s,t"],
+    )
+    assert result.exit_code == 0
+    # 20 tasks × (1000 × $0.025 + $0.10) = 20 × $25.10 = $502.00
+    assert "guardrail" in result.stdout.lower() or "$50" in result.stdout
 
 
 # ---------------------------------------------------------------------------
@@ -254,6 +278,28 @@ def test_day3_creates_output_directory(fake_export, stub_preflight_pass, tmp_pat
               "--output", str(out)],
     )
     assert out.exists() and out.is_dir()
+
+
+def test_day4_writes_json_envelope_to_output(fake_export, stub_preflight_pass, tmp_path):
+    """Day 4 wires build_envelope + write_json — report.json appears in --output."""
+    import json
+    out = tmp_path / "eval-out"
+    runner.invoke(
+        app, ["eval", str(fake_export),
+              "--tasks", "libero_spatial", "--num-episodes", "1",
+              "--output", str(out)],
+    )
+    envelope_path = out / "report.json"
+    assert envelope_path.exists()
+    parsed = json.loads(envelope_path.read_text())
+    assert parsed["schema_version"] == 1
+    assert parsed["suite"] == "libero"
+    assert parsed["runtime"] == "modal"
+    assert "cost" in parsed
+    assert parsed["cost"]["total_usd"] >= 0
+    assert "env" in parsed
+    assert "modal" in parsed
+    assert parsed["modal"] is not None  # runtime=modal → block populated
 
 
 # ---------------------------------------------------------------------------

@@ -854,12 +854,17 @@ def eval_cmd(
     """
     _setup_logging(verbose)
 
+    from reflex.eval.cost_model import (
+        COST_PREVIEW_GUARDRAIL_USD,
+        estimate_cost,
+    )
     from reflex.eval.libero import (
         ALL_RUNTIMES,
         LiberoSuite,
         LiberoSuiteConfig,
     )
     from reflex.eval.preflight import PreflightSmokeTest
+    from reflex.eval.report import build_envelope, capture_environment
     from reflex.eval.runner_dispatch import default_libero_tasks, resolve_task_runner
 
     # ---- Validate inputs at the CLI layer (fail loud) ----
@@ -920,19 +925,28 @@ def eval_cmd(
     if cost_preview:
         console.print(f"  Mode:        [yellow]COST PREVIEW (no run)[/yellow]")
 
-    # ---- Cost preview short-circuit (Day 4 wires the real cost model) ----
+    # ---- Cost preview short-circuit (uses cost_model.estimate_cost) ----
+    resolved_tasks = list(parsed_tasks) if parsed_tasks else default_libero_tasks()
     if cost_preview:
-        # Day 3 placeholder: number-of-episodes × number-of-tasks math.
-        # Day 4 (cost_model.py) replaces this with baked $/episode × runtime
-        # × suite table.
-        n_tasks = len(parsed_tasks) if parsed_tasks else len(default_libero_tasks())
-        total_episodes = n_tasks * num_episodes
-        console.print(
-            f"\n[yellow]Cost preview (Day 4 wires the real $/ep table):[/yellow]\n"
-            f"  Estimated episodes: {total_episodes} ({n_tasks} tasks × "
-            f"{num_episodes} eps)\n"
-            f"  Real $/ep table ships Day 4 — see eval-as-a-service plan."
+        cost_estimate = estimate_cost(
+            suite=suite, runtime=runtime,
+            tasks=resolved_tasks,
+            num_episodes_per_task=num_episodes,
         )
+        console.print(
+            f"\n[yellow]Cost preview ({len(resolved_tasks)} tasks × "
+            f"{num_episodes} eps):[/yellow]"
+        )
+        console.print(
+            f"  Total estimate: [bold]${cost_estimate.total_usd:.2f}[/bold] USD"
+        )
+        console.print(f"  {cost_estimate.notes}")
+        if cost_estimate.exceeds_guardrail:
+            console.print(
+                f"\n[red]Estimate exceeds ${COST_PREVIEW_GUARDRAIL_USD:.0f} "
+                f"guardrail.[/red] Run with smaller --num-episodes "
+                f"or fewer --tasks to lower the cost."
+            )
         raise typer.Exit(0)
 
     # ---- Pre-flight smoke test (catches 4-of-5 LIBERO failure modes) ----
@@ -998,10 +1012,30 @@ def eval_cmd(
             )
         console.print(per_task)
 
-    # JSON envelope wiring is Day 4 (cost_model + report.py); Day 3 substrate
-    # only prints to console. Output dir is created here for forward-compat.
+    # ---- JSON envelope (schema v1 LOCKED per ADR decision #3) ----
     output_path = Path(output)
     output_path.mkdir(parents=True, exist_ok=True)
+
+    actual_tasks = list(report.tasks) if report.tasks else resolved_tasks
+    cost_estimate = estimate_cost(
+        suite=suite, runtime=runtime,
+        tasks=actual_tasks,
+        num_episodes_per_task=num_episodes,
+    )
+    env_block = capture_environment(export_dir=export_path)
+    modal_block: dict | None = None
+    if runtime == "modal":
+        modal_block = {"image_digest": "TBD", "provider": "modal.com"}
+
+    envelope = build_envelope(
+        report=report,
+        cost=cost_estimate,
+        env=env_block,
+        num_episodes_per_task=num_episodes,
+        modal_block=modal_block,
+    )
+    envelope_path = envelope.write_json(output_path / "report.json")
+    console.print(f"\n  [dim]JSON envelope:[/dim] {envelope_path}")
 
     # Honest signaling: if EVERY episode is adapter_error (because Day 3 stub
     # runners always do that), exit non-zero so CI doesn't think it succeeded.
