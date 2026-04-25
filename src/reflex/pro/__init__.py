@@ -23,6 +23,12 @@ from reflex.pro.consent import (
     ProConsent,
 )
 from reflex.pro.data_collection import ProDataCollector
+from reflex.pro.distill_scheduler import (
+    DistillScheduler,
+    KickDecision,
+    SchedulerConfig,
+    SchedulerState,
+)
 from reflex.pro.license import (
     HardwareFingerprintLite,
     LicenseCorrupt,
@@ -40,7 +46,9 @@ __all__ = [
     "ConsentMismatch",
     "ConsentReceipt",
     "ConsentRequired",
+    "DistillScheduler",
     "HardwareFingerprintLite",
+    "KickDecision",
     "LicenseCorrupt",
     "LicenseError",
     "LicenseExpired",
@@ -51,6 +59,8 @@ __all__ = [
     "ProConsent",
     "ProDataCollector",
     "ProLicense",
+    "SchedulerConfig",
+    "SchedulerState",
     "issue_dev_license",
     "load_license",
 ]

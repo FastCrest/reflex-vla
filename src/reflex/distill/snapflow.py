@@ -286,6 +286,100 @@ def teacher_supervised_loss_step(
     return total, snapshot
 
 
+# Default mix between SnapFlow self-consistency and teacher-supervised
+# components. 0.5 weights both equally — preserves the 1-NFE speedup
+# while preventing the student from mode-collapsing on customer data
+# (per ADR 2026-04-25-self-distilling-serve-architecture decision #2).
+DEFAULT_DUAL_LOSS_TEACHER_ALPHA = 0.5
+
+
+def self_distilling_serve_loss_step(
+    student_velocity_fn: Callable[..., "torch.Tensor"],
+    teacher_velocity_fn: Callable[..., "torch.Tensor"],
+    *,
+    action: "torch.Tensor",
+    noise: "torch.Tensor",
+    t: "torch.Tensor",
+    obs_kwargs: dict,
+    teacher_obs_kwargs: dict | None = None,
+    consistency_alpha: float = DEFAULT_CONSISTENCY_ALPHA,
+    teacher_alpha: float = DEFAULT_DUAL_LOSS_TEACHER_ALPHA,
+) -> tuple["torch.Tensor", SnapFlowLosses]:
+    """SnapFlow + teacher-supervised dual-loss for the Pro-tier
+    self-distilling-serve loop.
+
+    The default ``snapflow_loss_step`` is self-distillation — both the
+    flow-matching target AND the consistency target come from the
+    student. On customer-specific data (narrow distribution), this lets
+    the student converge on solutions that ignore state ("a perfectly
+    self-consistent solution that happens to be useless on the
+    customer's task" per the SnapFlow paper).
+
+    The fix per ADR 2026-04-25-self-distilling-serve-architecture
+    decision #2: combine SnapFlow with teacher-supervised supervision.
+    The student must:
+      1. Match the analytic flow-matching velocity (as in standard SnapFlow)
+      2. Match the teacher's 2-step Euler shortcut at target_time=1
+         (preserves the 1-NFE speedup)
+      3. Match the teacher's velocity at the interpolation point itself
+         (NEW — anchors the student to the teacher's behavior on
+         customer-specific data; prevents mode-collapse)
+
+    Total loss:
+        flow_matching + consistency_alpha * consistency + teacher_alpha * teacher_match
+
+    Args:
+        Same as snapflow_loss_step PLUS teacher_alpha (mix weight for
+        the teacher-match term; default 0.5 per ADR).
+
+    Returns:
+        (loss_tensor, SnapFlowLosses snapshot). The snapshot's
+        ``consistency`` field carries the SnapFlow consistency loss;
+        the teacher-match component is encoded into the total but not
+        broken out separately (Phase 1 keeps the snapshot shape
+        backward-compatible; Phase 2 may add a dedicated field).
+    """
+    import torch
+    import torch.nn.functional as F
+
+    t_obs = teacher_obs_kwargs if teacher_obs_kwargs is not None else obs_kwargs
+
+    # (a) Flow-matching term — student matches analytic velocity.
+    x_t, v_target = flow_matching_interp(noise, action, t)
+    v_student = student_velocity_fn(x_t, t, target_time=None, **obs_kwargs)
+    fm_loss = F.mse_loss(v_student, v_target)
+
+    # (b) SnapFlow consistency term — student at target_time=1 matches
+    # teacher's 2-step Euler shortcut.
+    v_shortcut = two_step_euler_shortcut(
+        teacher_velocity_fn, x_t, t, obs_kwargs=t_obs,
+    )
+    target_time_one = torch.ones_like(t)
+    v_student_one = student_velocity_fn(
+        x_t, t, target_time=target_time_one, **obs_kwargs,
+    )
+    consistency_loss = F.mse_loss(v_student_one, v_shortcut)
+
+    # (c) Teacher-supervised term — student at the interpolation point
+    # matches teacher velocity. Anchors against mode-collapse on
+    # customer-specific data.
+    with torch.no_grad():
+        v_teacher = teacher_velocity_fn(x_t, t, **t_obs)
+    teacher_match_loss = F.mse_loss(v_student, v_teacher)
+
+    total = (
+        fm_loss
+        + consistency_alpha * consistency_loss
+        + teacher_alpha * teacher_match_loss
+    )
+    snapshot = SnapFlowLosses(
+        flow_matching=float(fm_loss.item()),
+        consistency=float(consistency_loss.item()),
+        total=float(total.item()),
+    )
+    return total, snapshot
+
+
 class ZeroInitTargetTimeEmbedding:
     """The "zero-init target_time" trick from SnapFlow.
 
@@ -390,9 +484,11 @@ def sinusoidal_time_embedding(
 
 __all__ = [
     "DEFAULT_CONSISTENCY_ALPHA",
+    "DEFAULT_DUAL_LOSS_TEACHER_ALPHA",
     "SnapFlowLosses",
     "ZeroInitTargetTimeEmbedding",
     "flow_matching_interp",
+    "self_distilling_serve_loss_step",
     "sinusoidal_time_embedding",
     "snapflow_loss_step",
     "teacher_supervised_loss_step",
