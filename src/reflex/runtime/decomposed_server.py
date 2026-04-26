@@ -635,12 +635,25 @@ class Pi05DecomposedServer:
     def _tokenize(self, instruction: str) -> tuple[np.ndarray, np.ndarray]:
         """Tokenize the instruction to lang_seq_len; returns (tokens, masks).
 
-        Pads with 0 tokens + zero mask when the instruction is shorter than
-        lang_seq_len; truncates when longer. This matches the SmolVLA
-        convention used by modal_libero_*.py.
+        For pi05 state-out exports the model expects the prompt formatted as
+        ``"Task: <instruction>;\\nAction: "`` (per Pi05PrepareTokenizerStateOutStep
+        in src/reflex/distill/pi05_state_out_processor.py). Without this
+        wrapper the lang_tokens distribution diverges from training and the
+        model emits garbage actions even with correct state-norm + action-denorm.
+        Caught 2026-04-26 LIBERO N=50 = 0% with denorm-only fix.
+
+        For non-state-out exports, the same format is harmless (the teacher
+        uses the same Task/Action wrapper; state-out's only difference is
+        omitting ", State: ..." from the prompt — already absent here since
+        we don't append state to lang).
+
+        Pads with 0 tokens + zero mask when the formatted prompt is shorter
+        than lang_seq_len; truncates when longer.
         """
+        cleaned = (instruction or "").strip().replace("_", " ").replace("\n", " ")
+        prompt = f"Task: {cleaned};\nAction: "
         encoded = self._tokenizer(
-            instruction or "",
+            prompt,
             padding="max_length",
             max_length=self.lang_seq_len,
             truncation=True,
