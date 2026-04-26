@@ -1463,6 +1463,23 @@ def serve(
              "needed. Per a2c2-correction execution plan B.5. Train with "
              "scripts/train_a2c2_lerobot.py (Modal A100; user-authorized).",
     ),
+    a2c2_latency_threshold_ms: float = typer.Option(
+        40.0,
+        "--a2c2-latency-threshold-ms",
+        help="A2C2 hook auto-skips when latency_p95 < this (ms). Default 40 "
+             "matches Orin Nano deployment expectations. Lower to force the "
+             "hook to apply at lower latency (e.g., for paper-methodology "
+             "measurement under --inject-latency-ms).",
+    ),
+    a2c2_success_threshold: float = typer.Option(
+        0.90,
+        "--a2c2-success-threshold",
+        help="A2C2 hook auto-skips when /act success rate > this (0..1). "
+             "NOTE: 'success' here is /act error-rate (server crash) NOT "
+             "task-success — without task feedback wired in, leave at 0.90 "
+             "for default behavior or set to 1.01 to disable success-skip "
+             "for measurement runs.",
+    ),
     cuda_graphs: bool = typer.Option(
         False,
         "--cuda-graphs",
@@ -1847,6 +1864,8 @@ def serve(
         cuda_graphs_enabled=cuda_graphs,
         max_batch_cost_ms=max_batch_cost_ms,
         a2c2_checkpoint=a2c2_checkpoint or None,
+        a2c2_latency_threshold_ms=a2c2_latency_threshold_ms,
+        a2c2_success_threshold=a2c2_success_threshold,
         auto_calibrate=auto_calibrate,
         calibration_cache_path=str(_calib_cache_path) if _calib_cache_path else None,
         calibrate_force=calibrate_force,

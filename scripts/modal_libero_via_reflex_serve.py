@@ -154,6 +154,8 @@ def libero_via_serve(
     task_suite_name: str = "libero_10",
     task_indices: list[int] | None = None,
     a2c2_checkpoint: str = "",
+    a2c2_latency_threshold_ms: float = 40.0,
+    a2c2_success_threshold: float = 0.90,
     inject_latency_ms: float = 0.0,
     seed: int = 7,
     serve_health_timeout_s: int = 480,
@@ -212,6 +214,8 @@ def libero_via_serve(
     ]
     if a2c2_checkpoint:
         serve_cmd.extend(["--a2c2-checkpoint", a2c2_checkpoint])
+        serve_cmd.extend(["--a2c2-latency-threshold-ms", str(a2c2_latency_threshold_ms)])
+        serve_cmd.extend(["--a2c2-success-threshold", str(a2c2_success_threshold)])
     if inject_latency_ms > 0:
         serve_cmd.extend(["--inject-latency-ms", str(int(inject_latency_ms))])
 
@@ -447,6 +451,8 @@ def main(
     tasks: str = "0",
     suite: str = "libero_10",
     a2c2_checkpoint: str = "",
+    a2c2_latency_threshold_ms: float = 40.0,
+    a2c2_success_threshold: float = 0.90,
     inject_latency_ms: float = 0.0,
 ):
     """Run LIBERO via reflex serve.
@@ -455,6 +461,8 @@ def main(
     --tasks "0,1,2"      3 tasks
     --tasks "all"        full suite
     --a2c2-checkpoint /gate_out/.../a2c2_head.npz  enable A2C2
+    --a2c2-success-threshold 1.01  disable success-based skip (for measurement)
+    --a2c2-latency-threshold-ms 0  disable latency-based skip (force-apply)
     --inject-latency-ms 100  synthetic latency for A2C2 measurement (ADR 2026-04-24)
     """
     if tasks == "all":
@@ -470,6 +478,8 @@ def main(
         task_suite_name=suite,
         task_indices=task_list,
         a2c2_checkpoint=a2c2_checkpoint,
+        a2c2_latency_threshold_ms=a2c2_latency_threshold_ms,
+        a2c2_success_threshold=a2c2_success_threshold,
         inject_latency_ms=inject_latency_ms,
     )
     print("\n=== RESULT ===")

@@ -1078,6 +1078,8 @@ def create_app(
     robot_id: str | None = None,  # fleet-telemetry: human-readable per-process identity
     cuda_graphs_enabled: bool = False,  # opt-in ORT cuda-graphs on decomposed sessions
     a2c2_checkpoint: str | None = None,  # path to .npz A2C2 head; None disables A2C2
+    a2c2_latency_threshold_ms: float = 40.0,  # hook auto-skip when latency_p95 < this (ms)
+    a2c2_success_threshold: float = 0.90,  # hook auto-skip when /act success rate > this; set to 1.01 to disable
     auto_calibrate: bool = False,  # Phase 1 auto-calibration opt-in
     calibration_cache_path: str | None = None,  # path to ~/.reflex/calibration.json
     calibrate_force: bool = False,  # ignore cache hit, re-run measurement
@@ -1423,8 +1425,14 @@ def create_app(
     server.a2c2_hook = None  # type: ignore[attr-defined]
     if a2c2_checkpoint:
         try:
-            from reflex.runtime.a2c2_hook import A2C2Hook
-            server.a2c2_hook = A2C2Hook.from_checkpoint(a2c2_checkpoint)  # type: ignore[attr-defined]
+            from reflex.runtime.a2c2_hook import A2C2Hook, A2C2HookConfig
+            _a2c2_cfg = A2C2HookConfig(
+                latency_threshold_ms=a2c2_latency_threshold_ms,
+                success_threshold=a2c2_success_threshold,
+            )
+            server.a2c2_hook = A2C2Hook.from_checkpoint(  # type: ignore[attr-defined]
+                a2c2_checkpoint, config=_a2c2_cfg,
+            )
             logger.info(
                 "A2C2 hook loaded: checkpoint=%s, "
                 "latency_threshold_ms=%.1f, success_threshold=%.2f",
