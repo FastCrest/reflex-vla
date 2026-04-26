@@ -1,5 +1,20 @@
 # Changelog
 
+## v0.3.5 — 2026-04-27
+
+### Added
+- **`reflex chat` now streams tokens live.** Reply renders to the terminal as it arrives instead of showing "thinking…" then a full block. Multi-tool queries still surface tool calls between turns. Use `--no-stream` for scripts that pipe output.
+- New backend method: `ChatBackend.chat_stream()` — yields parsed OpenAI delta chunks (Server-Sent Events through the existing Cloudflare Worker proxy).
+- New helper: `assemble_stream(chunks, on_token, on_tool_call_progress)` — assembles streaming chunks into a final assistant message dict, with optional callbacks for live UI.
+- New event: `LoopState` emits `token` events (per content fragment) and `turn_start` events (per LLM round-trip).
+- New flag: `LoopState.streaming: bool = True` — set False for tests that need deterministic single-shot replies.
+
+### Changed
+- **System prompt tightened against hallucination.** Added a CRITICAL rule: "Copy verbatim values (versions, paths, IDs, sizes, error messages) exactly from tool output. Do not paraphrase, round, or 'fix' them. If you didn't run a tool that returned the value, say 'I don't have that information' instead of guessing." Closes the v0.3.0 case where chat cited "torch 2.10.0" when the actual was 2.11.0.
+
+### Fixed
+- (No regressions — 46/46 tests pass including all 16 chat-tool routes.)
+
 ## v0.3.4 — 2026-04-27
 
 ### Changed

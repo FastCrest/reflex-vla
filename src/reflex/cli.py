@@ -3278,10 +3278,14 @@ def chat(
         False, "--dry-run",
         help="Don't execute tool calls; just print the commands the agent would run.",
     ),
+    no_stream: bool = typer.Option(
+        False, "--no-stream",
+        help="Disable token streaming (default streams live). Use for scripts that pipe output.",
+    ),
 ) -> None:
     """Natural-language chat that can run reflex commands for you."""
     from reflex.chat.console import run_repl
-    run_repl(proxy_url=proxy_url, dry_run=dry_run)
+    run_repl(proxy_url=proxy_url, dry_run=dry_run, no_stream=no_stream)
 
 
 config_app = typer.Typer(name="config", help="Show + manage reflex configuration.", no_args_is_help=True)
