@@ -241,18 +241,21 @@ def libero_via_serve(
         }
 
     # ---- HTTP client helper ----
-    def _post_act(image_arr: np.ndarray, instruction: str, state: list[float], episode_id: str) -> dict:
-        """POST one /act request + return the parsed response."""
-        # Encode the image as base64 PNG (decoder is server-side via PIL)
+    def _b64png(arr: np.ndarray) -> str:
         buf = io.BytesIO()
-        Image.fromarray(image_arr).save(buf, format="PNG")
-        img_b64 = base64.b64encode(buf.getvalue()).decode("ascii")
-        payload = {
-            "image": img_b64,
+        Image.fromarray(arr).save(buf, format="PNG")
+        return base64.b64encode(buf.getvalue()).decode("ascii")
+
+    def _post_act(image_arr: np.ndarray, instruction: str, state: list[float], episode_id: str, wrist_arr: np.ndarray | None = None) -> dict:
+        """POST one /act request + return the parsed response."""
+        payload: dict = {
+            "image": _b64png(image_arr),
             "instruction": instruction,
             "state": state,
             "episode_id": episode_id,
         }
+        if wrist_arr is not None:
+            payload["image_wrist"] = _b64png(wrist_arr)
         req = urllib.request.Request(
             f"http://127.0.0.1:{serve_port}/act",
             data=json.dumps(payload).encode("utf-8"),
@@ -339,6 +342,9 @@ def libero_via_serve(
                     while t < max_steps:
                         try:
                             agent_img = np.ascontiguousarray(obs["agentview_image"][::-1, ::-1])
+                            wrist_img = None
+                            if "robot0_eye_in_hand_image" in obs:
+                                wrist_img = np.ascontiguousarray(obs["robot0_eye_in_hand_image"][::-1, ::-1])
                             state_vec = np.concatenate([
                                 np.asarray(obs["robot0_eef_pos"], dtype=np.float32),
                                 _quat2axisangle(np.asarray(obs["robot0_eef_quat"], dtype=np.float32).copy()),
@@ -346,6 +352,7 @@ def libero_via_serve(
                             ]).astype(np.float32).tolist()
                             resp = _post_act(
                                 agent_img, task_description, state_vec, episode_id,
+                                wrist_arr=wrist_img,
                             )
                             if "error" in resp:
                                 raise RuntimeError(f"/act error: {resp['error']}")

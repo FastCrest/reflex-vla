@@ -461,28 +461,45 @@ class Pi05DecomposedServer:
         image_b64: str | None = None,
         instruction: str = "",
         state: list[float] | None = None,
+        image_wrist_b64: str | None = None,
     ) -> dict[str, Any]:
         """Sync entry point. Mirrors ReflexServer.predict_from_base64."""
-        # Decode image
-        image: np.ndarray | None = None
-        if image_b64:
-            try:
-                from PIL import Image
-                img_bytes = base64.b64decode(image_b64)
-                img = Image.open(io.BytesIO(img_bytes)).convert("RGB")
-                image = np.array(img)
-            except Exception as exc:  # noqa: BLE001
-                return {"error": f"Failed to decode image: {exc}"}
+        # Decode primary image
+        image: np.ndarray | None = self._decode_b64_image(image_b64)
+        if isinstance(image, dict):
+            return image  # error envelope from decoder
+
+        # Decode optional wrist image (multi-camera VLAs like pi05)
+        image_wrist: np.ndarray | None = None
+        if image_wrist_b64:
+            image_wrist = self._decode_b64_image(image_wrist_b64)
+            if isinstance(image_wrist, dict):
+                return image_wrist
 
         return self._predict(
             image=image, instruction=instruction or "", state=state,
+            image_wrist=image_wrist,
         )
+
+    def _decode_b64_image(self, b64: str | None) -> "np.ndarray | dict[str, Any] | None":
+        """Decode a base64 PNG/JPEG to HxWx3 uint8 ndarray. Returns None on
+        empty input, an error envelope dict on decode failure."""
+        if not b64:
+            return None
+        try:
+            from PIL import Image
+            img_bytes = base64.b64decode(b64)
+            img = Image.open(io.BytesIO(img_bytes)).convert("RGB")
+            return np.array(img)
+        except Exception as exc:  # noqa: BLE001
+            return {"error": f"Failed to decode image: {exc}"}
 
     async def predict_from_base64_async(
         self,
         image_b64: str | None = None,
         instruction: str = "",
         state: list[float] | None = None,
+        image_wrist_b64: str | None = None,
     ) -> dict[str, Any]:
         """Async entry point matching ReflexServer's contract."""
         # Pi05DecomposedInference is sync-only; offload to thread to avoid
@@ -490,8 +507,10 @@ class Pi05DecomposedServer:
         loop = asyncio.get_running_loop()
         return await loop.run_in_executor(
             None,
-            self.predict_from_base64,
-            image_b64, instruction, state,
+            lambda: self.predict_from_base64(
+                image_b64=image_b64, instruction=instruction,
+                state=state, image_wrist_b64=image_wrist_b64,
+            ),
         )
 
     async def run_batch(self, requests: list) -> list[dict[str, Any]]:
@@ -504,6 +523,7 @@ class Pi05DecomposedServer:
                 image_b64=getattr(req, "image", None),
                 instruction=getattr(req, "instruction", "") or "",
                 state=getattr(req, "state", None),
+                image_wrist_b64=getattr(req, "image_wrist", None),
             )
             results.append(res)
         return results
@@ -516,6 +536,7 @@ class Pi05DecomposedServer:
         image: np.ndarray | None,
         instruction: str,
         state: list[float] | None,
+        image_wrist: np.ndarray | None = None,
     ) -> dict[str, Any]:
         """Pure-numpy prep + inference + postprocess. Catches + envelopes
         any exception in the standard error dict (so /act returns a clean
@@ -526,11 +547,19 @@ class Pi05DecomposedServer:
 
         t0 = time.perf_counter()
         try:
-            # 1. Image prep -- 1 customer image becomes 3 cameras (base + 2
-            #    padded). Resize/pad to camera_resolution. Float32 [0, 1].
+            # 1. Image prep. pi05 was trained on 2 real cameras (base/agentview
+            # + wrist/eye-in-hand). When the customer provides image_wrist, use
+            # it as cam2; otherwise fall back to the -1 padding (model handles
+            # missing camera via mask=0). Caught 2026-04-26: feeding 1 real
+            # camera + padded cam2 produces OOD VLM prefix tokens -> 0% LIBERO.
             img_base, mask_base = self._prep_image(image)
-            # Padded second + third cameras (per the SmolVLA convention:
-            # missing cams are -1 image + zero mask).
+            if image_wrist is not None:
+                img_wrist_l, mask_wrist_l = self._prep_image(image_wrist)
+            else:
+                img_wrist_l = np.full_like(img_base, -1.0)
+                mask_wrist_l = np.zeros_like(mask_base)
+            # 3rd camera (wrist_r) stays padded -- pi05 was trained with
+            # exactly 2 real cams + 1 explicit empty per the preprocessor JSON.
             img_pad = np.full_like(img_base, -1.0)
             mask_pad = np.zeros_like(mask_base)
 
@@ -548,8 +577,8 @@ class Pi05DecomposedServer:
 
             # 5. Inference
             actions_padded = self._inference.predict_action_chunk(
-                img_base=img_base, img_wrist_l=img_pad, img_wrist_r=img_pad,
-                mask_base=mask_base, mask_wrist_l=mask_pad, mask_wrist_r=mask_pad,
+                img_base=img_base, img_wrist_l=img_wrist_l, img_wrist_r=img_pad,
+                mask_base=mask_base, mask_wrist_l=mask_wrist_l, mask_wrist_r=mask_pad,
                 lang_tokens=lang_tokens, lang_masks=lang_masks,
                 noise=noise, state=state_arr,
             )

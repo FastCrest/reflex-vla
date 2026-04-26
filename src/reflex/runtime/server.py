@@ -1029,7 +1029,8 @@ try:
     from pydantic import BaseModel
 
     class PredictRequest(BaseModel):
-        image: str | None = None  # base64 encoded
+        image: str | None = None  # base64 encoded -- the primary/agentview camera
+        image_wrist: str | None = None  # base64 encoded -- optional wrist/eye-in-hand camera; required by multi-camera VLAs (e.g., pi05 trained with image + image2)
         instruction: str = ""
         state: list[float] | None = None
         episode_id: str | None = None  # B.3: triggers RTC reset on change
@@ -1928,6 +1929,7 @@ def create_app(
                             image_b64=request.image,
                             instruction=request.instruction,
                             state=request.state,
+                            image_wrist_b64=request.image_wrist,
                         )
                     else:
                         try:
