@@ -2,6 +2,11 @@
 
 > by [FastCrest](https://fastcrest.com) — deployment infrastructure for vision-language-action models.
 
+[![PyPI](https://img.shields.io/pypi/v/reflex-vla.svg)](https://pypi.org/project/reflex-vla/)
+[![Python](https://img.shields.io/pypi/pyversions/reflex-vla.svg)](https://pypi.org/project/reflex-vla/)
+[![License](https://img.shields.io/pypi/l/reflex-vla.svg)](https://github.com/rylinjames/reflex-vla/blob/main/LICENSE)
+[![Downloads](https://img.shields.io/pypi/dm/reflex-vla.svg)](https://pypi.org/project/reflex-vla/)
+
 **The deployment layer for VLAs** — take a Vision-Language-Action model off the training cluster and onto a robot. Now with **`reflex chat`** — talk to your robot fleet in plain English.
 
 **Verified parity across ALL four major open VLAs.** Reflex's monolithic ONNX export matches the reference PyTorch policy to **cos = +1.000000** end-to-end on SmolVLA, pi0, pi0.5 (canonical 10-step flow-matching unrolled) and GR00T N1.6 (canonical 4-step DDIM loop external to the ONNX). Per-model first-action max_abs: SmolVLA 5.96e-07, pi0 2.09e-07, pi0.5 2.38e-07, GR00T 8.34e-07 — all at machine precision, shared seeded inputs. Full claim ledger in [reflex_context/measured_numbers.md](reflex_context/measured_numbers.md).
