@@ -218,6 +218,24 @@ def run_libero_onnx(
     t0 = time.time()
     providers = [("CUDAExecutionProvider", {"device_id": 0}), "CPUExecutionProvider"]
     sess = ort.InferenceSession(str(onnx_path), providers=providers)
+
+    # Probe input names so we know which camera-naming convention this export uses.
+    # SmolVLA exports use img_cam1/cam2/cam3; pi05 exports use img_base/wrist_l/wrist_r.
+    # Both have lang_tokens/lang_masks/state/noise but the camera names differ.
+    # Without this probe, the wrong feed dict gets a "Required inputs missing" error
+    # at first sess.run (caught 2026-04-26 firing teacher pi05 eval through this script).
+    _input_names = {inp.name for inp in sess.get_inputs()}
+    if "img_cam1" in _input_names:
+        _cam_keys = ("img_cam1", "img_cam2", "img_cam3", "mask_cam1", "mask_cam2", "mask_cam3")
+        print(f"[onnx] cam naming: SmolVLA-style (cam1/cam2/cam3)")
+    elif "img_base" in _input_names:
+        _cam_keys = ("img_base", "img_wrist_l", "img_wrist_r", "mask_base", "mask_wrist_l", "mask_wrist_r")
+        print(f"[onnx] cam naming: pi05-style (base/wrist_l/wrist_r)")
+    else:
+        raise RuntimeError(
+            f"Unknown camera-naming convention in ONNX inputs: {sorted(_input_names)}. "
+            f"Expected either img_cam1 (SmolVLA) or img_base (pi05) as first image input."
+        )
     used_providers = sess.get_providers()
     print(f"[onnx]   loaded in {time.time()-t0:.1f}s — providers={used_providers}")
     input_names = [i.name for i in sess.get_inputs()]
@@ -359,17 +377,23 @@ def run_libero_onnx(
             return a.astype(dtype) if dtype is not None else a
 
         feed = {
-            "img_cam1": _np(images[0], np.float32),
-            "img_cam2": _np(images[1], np.float32),
-            "img_cam3": _np(images[2], np.float32),
-            "mask_cam1": _np(img_masks[0], bool),
-            "mask_cam2": _np(img_masks[1], bool),
-            "mask_cam3": _np(img_masks[2], bool),
+            _cam_keys[0]: _np(images[0], np.float32),
+            _cam_keys[1]: _np(images[1], np.float32),
+            _cam_keys[2]: _np(images[2], np.float32),
+            _cam_keys[3]: _np(img_masks[0], bool),
+            _cam_keys[4]: _np(img_masks[1], bool),
+            _cam_keys[5]: _np(img_masks[2], bool),
             "lang_tokens": _np(lang_tokens, np.int64),
             "lang_masks": _np(lang_masks, bool),
             "state": _np(state, np.float32),
             "noise": _np(noise, np.float32),
         }
+        # pi05 export inputs DON'T include 'state' (state is fed via lang prompt
+        # for state-in exports, or via state_proj for state-out — but the
+        # monolithic export doesn't expose state_proj as a separate input).
+        # SmolVLA includes 'state'. Drop the key if not in inputs.
+        if "state" not in _input_names:
+            feed.pop("state", None)
 
         out = sess.run(["actions"], feed)[0]  # [B, chunk, max_action_dim]
         return torch.from_numpy(out)
