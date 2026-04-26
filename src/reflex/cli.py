@@ -3099,5 +3099,21 @@ except Exception as _distill_import_exc:  # pragma: no cover - defensive
     pass
 
 
+@app.command()
+def chat(
+    proxy_url: Optional[str] = typer.Option(
+        None, "--proxy-url",
+        help="FastCrest proxy URL. Defaults to https://chat.fastcrest.com or $FASTCREST_PROXY_URL.",
+    ),
+    dry_run: bool = typer.Option(
+        False, "--dry-run",
+        help="Don't execute tool calls; just print the commands the agent would run.",
+    ),
+) -> None:
+    """Natural-language chat that can run reflex commands for you."""
+    from reflex.chat.console import run_repl
+    run_repl(proxy_url=proxy_url, dry_run=dry_run)
+
+
 if __name__ == "__main__":
     app()

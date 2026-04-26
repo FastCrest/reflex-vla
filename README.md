@@ -1,21 +1,54 @@
 # Reflex
 
-**The deployment layer for VLAs** — take a Vision-Language-Action model off the training cluster and onto a robot.
+> by [FastCrest](https://fastcrest.com) — deployment infrastructure for vision-language-action models.
 
-**Verified parity across ALL four major open VLAs.** Reflex's monolithic ONNX export matches the reference PyTorch policy to **cos = +1.000000** end-to-end on SmolVLA, pi0, pi0.5 (canonical 10-step flow-matching unrolled) and GR00T N1.6 (canonical 4-step DDIM loop external to the ONNX). Per-model first-action max_abs: SmolVLA 5.96e-07, pi0 2.09e-07, pi0.5 2.38e-07, GR00T 8.34e-07 — all at machine precision, shared seeded inputs. Reproducers: `modal run scripts/modal_{smolvla,pi0,pi05,gr00t}_monolithic_export.py --parity`. The full claim ledger (verified / unverified / unmeasured) lives in [reflex_context/measured_numbers.md](reflex_context/measured_numbers.md).
+**The deployment layer for VLAs** — take a Vision-Language-Action model off the training cluster and onto a robot. Now with **`reflex chat`** — talk to your robot fleet in plain English.
 
-Cross-framework ONNX export, edge-first serving, composable runtime wedges (safety, adaptive denoising, cloud-edge split, pre-flight validation). One CLI, seven verbs.
+**Verified parity across ALL four major open VLAs.** Reflex's monolithic ONNX export matches the reference PyTorch policy to **cos = +1.000000** end-to-end on SmolVLA, pi0, pi0.5 (canonical 10-step flow-matching unrolled) and GR00T N1.6 (canonical 4-step DDIM loop external to the ONNX). Per-model first-action max_abs: SmolVLA 5.96e-07, pi0 2.09e-07, pi0.5 2.38e-07, GR00T 8.34e-07 — all at machine precision, shared seeded inputs. Full claim ledger in [reflex_context/measured_numbers.md](reflex_context/measured_numbers.md).
 
-**Want a deeper walkthrough?** See [docs/getting_started.md](docs/getting_started.md) for a 30-min guide covering safety configs, fleet-mode batching, deadline enforcement, and common troubleshooting.
+One CLI, seven verbs, plus a chat agent.
 
-**Something not working?** Run `reflex doctor` first — diagnoses install + GPU issues in one screen.
-
-## Quickstart — one command
+## Install
 
 ```bash
-# Install (v0.1 — from GitHub until we publish to PyPI)
-pip install 'reflex-vla[serve,gpu,monolithic] @ git+https://github.com/rylinjames/reflex-vla'
+pip install reflex-vla
+```
 
+For GPU serving + monolithic export (production path):
+
+```bash
+pip install 'reflex-vla[serve,gpu,monolithic]'
+```
+
+## Quickstart — chat to it
+
+```bash
+reflex chat
+```
+
+```
+you › what version am I running and what hardware can I deploy to?
+
+  → show_version({})    → reflex --version    → "reflex 0.2.0"
+  → list_targets({})    → reflex targets      → [orin-nano, orin, orin-64, thor, desktop]
+
+You're running reflex 0.2.0. Supported targets:
+  - orin-nano — Jetson Orin Nano: 8 GB, fp16
+  - orin — Jetson AGX Orin 32GB: 32 GB, fp16
+  - orin-64 — Jetson AGX Orin 64GB: 64 GB, fp16
+  - thor — Jetson Thor: 128 GB, fp8
+  - desktop — Desktop GPU (RTX 4090 / A100 / H100): 24 GB, fp16
+
+Want me to show which models support each target, or run reflex doctor?
+```
+
+Chat understands 16 reflex commands (export, serve, bench, eval, distill, finetune, traces, doctor, etc.) and runs them as subprocess on your behalf. Powered by GPT-5 Mini through a proxy hosted at `chat.fastcrest.com` — free tier is 100 calls/day per machine, no signup, no API key.
+
+> Bring your own key? `export FASTCREST_PROXY_URL=https://api.openai.com/v1` (coming in v0.3 — for now, the hosted proxy is the path).
+
+## Quickstart — explicit deploy
+
+```bash
 # Browse the curated model registry
 reflex models list
 
@@ -56,9 +89,10 @@ curl -X POST http://localhost:8000/act -H 'content-type: application/json' \
 
 `reflex go` auto-detects your hardware (NVIDIA GPU / Jetson / CPU), picks the right model variant for that device, downloads weights from HuggingFace, and starts the /act endpoint. **No editing configs, no separate `reflex export` step, no manual variant selection.** For models that ship as raw PyTorch weights, you get the export command to run next.
 
-### The 7 verbs
+### The verb surface
 
 ```
+reflex chat             # NEW — natural-language interface to every command below
 reflex go               # one-command-deploy: probe → resolve → pull → serve
 reflex serve            # explicit-config server (full flag surface)
 reflex doctor           # diagnose env + GPU + per-deploy issues
@@ -68,16 +102,17 @@ reflex validate {dataset, export}           # pre-flight checks
 reflex inspect {bench, replay, targets, guard, doctor}   # diagnostics + forensics
 ```
 
-Hidden legacy commands (`export`, `bench`, `replay`, etc.) stay callable for one release as alias bridges. Removed in v0.2.
+Hidden legacy commands (`export`, `bench`, `replay`, etc.) stay callable for one release as alias bridges. Removed in v0.3.
 
 ### Install notes
 
 - `[monolithic]` extra is required for the cos=+1.000000 verified export path (pins transformers==5.3.0)
-- CPU-only: `pip install 'reflex-vla[serve,onnx,monolithic] @ git+https://github.com/rylinjames/reflex-vla'`
+- CPU-only: `pip install 'reflex-vla[serve,onnx,monolithic]'`
 - GPU install needs the FULL cuDNN 9 system library (not just the pip wheel). Easiest path: NVIDIA's container `docker run --gpus all -it nvcr.io/nvidia/tensorrt:24.10-py3`, then `apt-get install -y clang` (for lerobot→evdev), then the pip install
 - `reflex serve` errors loudly if cuDNN can't load — no silent CPU fallback
 - First `reflex go` downloads weights (~1-14 GB depending on model) — cached on subsequent runs
 - First serve takes 10-70s warmup; `/health` returns HTTP 503 until ready, HTTP 200 after — load balancers correctly skip the server during warmup
+- `reflex chat` works on the base install — no extras required. Network access required (calls FastCrest's hosted proxy).
 
 ### Docker — zero-install serve
 
@@ -255,4 +290,8 @@ Apache 2.0
 
 ## Status
 
-v0.1 — active development. Install, kick the tires, open issues loudly. We're looking for the first 20 robotics teams actually deploying this; your feedback shapes v0.2.
+**v0.3 — `reflex chat` ships.** Active development. Install, kick the tires, open issues loudly. We're looking for the first 20 robotics teams actually deploying this; your feedback shapes v0.4.
+
+---
+
+Reflex is built by [FastCrest](https://fastcrest.com). Apache 2.0, no signup, no telemetry by default.

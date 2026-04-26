@@ -4,8 +4,8 @@ build-backend = "hatchling.build"
 
 [project]
 name = "reflex-vla"
-version = "0.1.0"
-description = "Deploy any VLA model to any edge hardware. One command."
+version = "0.3.0"
+description = "Deploy any VLA model to any edge hardware. Now with reflex chat — natural-language CLI."
 readme = "README.md"
 license = "Apache-2.0"
 requires-python = ">=3.10"
