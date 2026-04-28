@@ -2546,17 +2546,31 @@ def doctor(
                          "(install Jetpack on Jetson, or use nvcr.io/nvidia/tensorrt container)",
     )
 
-    # Disk space at /tmp (where exports default)
+    # Disk space at /tmp (used for transient export intermediates only — the
+    # actual model export cache lives at ~/.cache/reflex/exports). On many
+    # Linux distros /tmp is tmpfs (RAM-backed), in which case "free disk"
+    # really means "free RAM", so label it explicitly to avoid confusion.
     try:
         usage = shutil.disk_usage("/tmp")
         free_gb = usage.free / 1e9
+        is_tmpfs = False
+        try:
+            with open("/proc/mounts", "r") as f:
+                for line in f:
+                    parts = line.split()
+                    if len(parts) >= 3 and parts[1] == "/tmp" and parts[2] == "tmpfs":
+                        is_tmpfs = True
+                        break
+        except Exception:
+            pass
+        suffix = " (tmpfs/RAM-backed — model exports use ~/.cache/reflex/exports instead)" if is_tmpfs else " (transient ONNX/TRT scratch only — exports land in ~/.cache/reflex/exports)"
         add(
-            "Free disk in /tmp",
-            free_gb > 10,
-            f"{free_gb:.1f} GB free (need ~10 GB for largest model export)",
+            "Free space in /tmp",
+            free_gb > 2,
+            f"{free_gb:.1f} GB free{suffix}",
         )
     except Exception as e:
-        add("Free disk in /tmp", False, str(e))
+        add("Free space in /tmp", False, str(e))
 
     # HuggingFace cache
     hf_home = os.environ.get("HF_HOME") or os.path.expanduser("~/.cache/huggingface")

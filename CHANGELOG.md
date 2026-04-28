@@ -1,5 +1,19 @@
 # Changelog
 
+## v0.5.1 — 2026-04-28
+
+First-tester polish — bugs caught within the first hour of public install.
+
+### Added
+- **Bootstrap installer** at `https://fastcrest.com/install`. One-liner: `curl -fsSL https://fastcrest.com/install | sh`. Detects platform (Mac / Jetson Orin / NVIDIA GPU / CPU) and picks the right `[serve,*]` extras automatically. Bails fast on unsupported hardware (original Maxwell-era Jetson Nano: JetPack 4.6 + 4 GB memory + no Tensor Cores can't run modern VLAs — redirected to Mac / Orin / cloud paths). Bootstraps `pip` via `ensurepip` when missing (caught on Arch with system Python 3.13 lacking pip module). Source: `install.sh` in the repo root.
+
+### Fixed
+- **`reflex doctor` /tmp check is no longer misleading on tmpfs systems.** Many Linux distros mount `/tmp` as `tmpfs` (RAM-backed), where the previous "Free disk in /tmp" check was actually measuring free RAM. Doctor now detects tmpfs via `/proc/mounts` and labels the check accordingly: `(tmpfs/RAM-backed — model exports use ~/.cache/reflex/exports instead)`. Also clarifies that `/tmp` only holds transient ONNX/TRT scratch — the real export cache lives at `~/.cache/reflex/exports` (or `$REFLEX_HOME/exports`). Reduced the threshold from 10 GB → 2 GB since /tmp doesn't need to hold the full model artifact.
+
+### Notes
+- No functional code changes vs v0.5.0 in the model export, serve, or chat paths.
+- The bootstrap installer is independent of the PyPI package — it just calls `pip install` after pre-flight checks. Existing `pip install reflex-vla` continues to work.
+
 ## v0.5.0 — 2026-04-28
 
 License + repo visibility milestone.
