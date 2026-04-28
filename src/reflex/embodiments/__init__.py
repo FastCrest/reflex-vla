@@ -131,9 +131,16 @@ class EmbodimentConfig:
         path = _PRESETS_DIR / f"{name}.json"
         if not path.exists():
             available = sorted(p.stem for p in _PRESETS_DIR.glob("*.json"))
+            user_dir = Path.home() / ".cache" / "reflex" / "embodiments"
             raise ValueError(
-                f"Unknown embodiment preset '{name}'. "
-                f"Available: {available or '(none — run scripts/emit_embodiment_presets.py)'}"
+                f"Unknown embodiment preset '{name}'.\n"
+                f"  Available bundled presets: {available or '(none — package may be stale, try: pip install --upgrade reflex-vla)'}\n"
+                f"  Workarounds:\n"
+                f"    1. Drop --embodiment to run without normalization (raw actions).\n"
+                f"    2. Use one of the bundled presets above.\n"
+                f"    3. Drop your own JSON at {user_dir}/{name}.json\n"
+                f"       (see docs/embodiment_schema.md for the format) and pass it via\n"
+                f"       --custom-embodiment-config {user_dir}/{name}.json"
             )
         return cls.load_custom(str(path))
 

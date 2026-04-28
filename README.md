@@ -65,12 +65,19 @@ Chat understands 16 reflex commands (export, serve, bench, eval, distill, finetu
 # Browse the curated model registry
 reflex models list
 
-# One command — probe hardware → resolve model → pull → serve
+# Smoke test — probe hardware → resolve model → pull → export → serve
+reflex go --model smolvla-base
+
+# Now make it real with per-robot normalization (ships with franka, so100, ur5)
 reflex go --model smolvla-base --embodiment franka
 
-# Or with explicit hardware override + Python client
+# Or with explicit hardware override
 reflex go --model pi05-libero --embodiment franka --device-class a10g
 ```
+
+Drop `--embodiment` for a quick smoke test — the server starts cleanly and `/act` returns
+unscaled raw actions. Add `--embodiment <preset>` (or `--custom-embodiment-config <path>`)
+when you're ready for per-robot normalization + ActionGuard clamping.
 
 Then from your code:
 

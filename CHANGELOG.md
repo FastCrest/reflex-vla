@@ -1,5 +1,16 @@
 # Changelog
 
+## v0.5.3 — 2026-04-28
+
+Quickstart polish — README + embodiment error message.
+
+### Changed
+- **README quickstart now leads with the no-embodiment smoke test.** The headline example used to be `reflex go --model smolvla-base --embodiment franka`, which crashes the server hard if the preset isn't loadable. The first command is now `reflex go --model smolvla-base` (always works, returns raw actions). Embodiment is the second example, framed as "now make it real."
+- **Embodiment-not-found error is much more actionable.** Lists bundled presets, then three workarounds in priority order: (1) drop `--embodiment`, (2) use a bundled preset, (3) drop your own JSON at `~/.cache/reflex/embodiments/<name>.json` + use `--custom-embodiment-config`. Prior message just said "run scripts/emit_embodiment_presets.py" which isn't shipped to pip-installed users.
+
+### Notes
+- No behavioral changes to embodiment loading semantics — preset-not-found still fails hard at startup. The hard-vs-soft fail decision is parked for a separate v0.5.4 discussion.
+
 ## v0.5.2 — 2026-04-28
 
 Embodiment presets ship in the package now.
