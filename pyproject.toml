@@ -49,17 +49,36 @@ dependencies = [
 [project.optional-dependencies]
 # CPU inference runtime (onnx is a core dep now). Use this for CPU-only boxes.
 onnx = ["onnxruntime>=1.17.0"]
-# GPU inference — installs onnxruntime-gpu AND the ORT-compatible CUDA stack.
-# Use this when deploying to a box with an NVIDIA GPU. ORT 1.20+ wants CUDA 12.x
-# and cuDNN 9.x; these pip deps ship their own libs so the end-user doesn't have
-# to install CUDA separately. Apr-14 post-mortem: omitting these was the cause
-# of silent CPU fallback in v0.1 benchmarks.
+# GPU inference — installs onnxruntime-gpu AND the ORT-compatible CUDA stack
+# AND TensorRT so ORT-TRT EP loads out of the box. Use this when deploying to
+# a box with an NVIDIA GPU.
+#
+# ORT 1.20+ wants CUDA 12.x + cuDNN 9.x; these pip deps ship their own libs
+# so the end-user doesn't have to install CUDA separately.
+#
+# v0.7 (2026-04-29): tensorrt added to default [gpu] extras after Modal A10G
+# spike measured 5.55x speedup of ORT-TRT EP vs ORT-CUDA EP on SmolVLA
+# monolithic. Without tensorrt installed, libnvinfer.so.10 isn't loadable
+# and ORT silently falls back to CUDA EP — losing the 5.55x. See ADR
+# 2026-04-29-ort-trt-ep-first-class-support.md. Adds ~2 GB to install.
+#
+# Apr-14 post-mortem: omitting cuDNN/cuBLAS pulls was the cause of silent
+# CPU fallback in v0.1 benchmarks. Same shape of bug at the TRT layer is
+# why v0.7 ships tensorrt by default in [gpu].
 gpu = [
     "onnxruntime-gpu>=1.20,<1.24",
     "nvidia-cudnn-cu12>=9.0,<10.0",
     "nvidia-cublas-cu12>=12.0,<13.0",
+    # New in v0.7: provides libnvinfer.so.10 for ORT-TRT EP
+    "tensorrt>=10.0,<11; sys_platform == 'linux'",
 ]
-# tensorrt = ["tensorrt>=10.0"]  # install on Linux/Jetson only: pip install tensorrt
+# Optional: skip tensorrt for users who explicitly don't want the 2 GB install
+# footprint. They get ORT-CUDA EP only (~5x slower than TRT EP on transformers).
+gpu-min = [
+    "onnxruntime-gpu>=1.20,<1.24",
+    "nvidia-cudnn-cu12>=9.0,<10.0",
+    "nvidia-cublas-cu12>=12.0,<13.0",
+]
 # HTTP serve stack. Includes onnxruntime (CPU) so `pip install reflex-vla[serve]`
 # gives you a working server out of the box. For GPU, use `[serve,gpu]` to pull in
 # onnxruntime-gpu + CUDA libs.
