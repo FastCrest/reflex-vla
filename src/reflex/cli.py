@@ -2371,6 +2371,117 @@ def check(
         raise typer.Exit(1)
 
 
+def _check_trt_ep_load_chain(add) -> None:
+    """Validate that ORT-TRT EP can actually load + activate.
+
+    Adds 4 checks to the doctor table via the `add(name, ok, detail)` callback:
+    1. libnvinfer.so.10 loadable (the TRT runtime; from `tensorrt` pip pkg)
+    2. libcublas.so.12 loadable (CUDA BLAS; from `nvidia-cublas-cu12` pip pkg)
+    3. libcudnn.so.9 loadable (CUDA NN; from `nvidia-cudnn-cu12` pip pkg)
+    4. ort.InferenceSession with TRT EP succeeds + active providers includes it
+       (gold standard — proves the entire load chain works end-to-end)
+
+    Each check has a remediation hint inline. Per ADR
+    2026-04-29-ort-trt-ep-first-class-support.md.
+    """
+    import ctypes
+
+    # Check 1-3: shared library loadability via ctypes.CDLL
+    libs = [
+        ("libnvinfer.so.10", "TensorRT runtime",
+         "pip install 'reflex-vla[serve,gpu]' (brings tensorrt>=10)"),
+        ("libcublas.so.12", "CUDA cuBLAS",
+         "pip install nvidia-cublas-cu12 (auto-included in [serve,gpu])"),
+        ("libcudnn.so.9", "CUDA cuDNN",
+         "pip install nvidia-cudnn-cu12 (auto-included in [serve,gpu])"),
+    ]
+    all_libs_loadable = True
+    for libname, friendly, fix_hint in libs:
+        try:
+            ctypes.CDLL(libname)
+            add(f"{friendly} ({libname})", True, "loadable")
+        except OSError as exc:
+            all_libs_loadable = False
+            add(
+                f"{friendly} ({libname})",
+                False,
+                f"NOT loadable — ORT-TRT EP will silently fall back to "
+                f"ORT-CUDA EP (~5x slower). Fix: {fix_hint}",
+            )
+
+    # Check 4: gold standard — actually create an ORT session with TRT EP
+    # and verify the provider becomes active. Skip if libs failed (would
+    # produce a less-informative error).
+    if not all_libs_loadable:
+        add(
+            "ORT-TRT EP active",
+            False,
+            "skipped — fix the missing libs above first",
+        )
+        return
+
+    try:
+        import onnxruntime as ort
+    except ImportError:
+        add("ORT-TRT EP active", False,
+            "onnxruntime not installed — pip install 'reflex-vla[serve,gpu]'")
+        return
+
+    if "TensorrtExecutionProvider" not in ort.get_available_providers():
+        add(
+            "ORT-TRT EP active",
+            False,
+            "TensorrtExecutionProvider not in onnxruntime's available "
+            "providers list. Either onnxruntime-gpu isn't installed (use "
+            "'reflex-vla[serve,gpu]') or you're on a CPU-only ORT build.",
+        )
+        return
+
+    # Build a tiny dummy ONNX in-memory and try to load with TRT EP.
+    # If the session creates AND active providers includes TRT EP, we're golden.
+    try:
+        import onnx
+        from onnx import helper, TensorProto
+
+        # Trivial 1-add graph: y = x + x. Smallest valid ONNX.
+        x = helper.make_tensor_value_info("x", TensorProto.FLOAT, [1])
+        y = helper.make_tensor_value_info("y", TensorProto.FLOAT, [1])
+        node = helper.make_node("Add", ["x", "x"], ["y"])
+        graph = helper.make_graph([node], "doctor-probe", [x], [y])
+        model_proto = helper.make_model(graph, opset_imports=[helper.make_opsetid("", 19)])
+        model_proto.ir_version = 9
+        model_bytes = model_proto.SerializeToString()
+    except Exception as exc:  # noqa: BLE001
+        add("ORT-TRT EP active", False,
+            f"could not build probe ONNX: {type(exc).__name__}: {exc}")
+        return
+
+    try:
+        sess = ort.InferenceSession(
+            model_bytes,
+            providers=["TensorrtExecutionProvider", "CPUExecutionProvider"],
+        )
+        active = sess.get_providers()
+        if "TensorrtExecutionProvider" in active:
+            add("ORT-TRT EP active", True,
+                f"session created, active providers: {active}")
+        else:
+            add(
+                "ORT-TRT EP active",
+                False,
+                f"session created but TRT EP fell back. Active: {active}. "
+                f"Likely: libnvinfer or CUDA libs not findable at runtime "
+                f"despite ctypes load succeeding (try setting "
+                f"LD_LIBRARY_PATH manually).",
+            )
+    except Exception as exc:  # noqa: BLE001
+        add(
+            "ORT-TRT EP active",
+            False,
+            f"session creation failed: {type(exc).__name__}: {str(exc)[:200]}",
+        )
+
+
 @app.command()
 def doctor(
     model: str = typer.Option(
@@ -2633,6 +2744,16 @@ def doctor(
         trtexec_path or "not on PATH — TRT engine build skipped during reflex export "
                          "(install Jetpack on Jetson, or use nvcr.io/nvidia/tensorrt container)",
     )
+
+    # ─── ORT-TRT EP load chain validation (v0.7) ─────────────────────
+    # ORT-TRT EP gives ~5.55x speedup vs ORT-CUDA EP on transformer
+    # workloads (Modal A10G spike 2026-04-29, SmolVLA monolithic).
+    # Most users silently get ORT-CUDA fallback because libnvinfer.so.10
+    # / libcublas.so.12 / libcudnn.so.9 aren't on LD_LIBRARY_PATH.
+    # These checks make the actual problem visible.
+    # Per ADR 2026-04-29-ort-trt-ep-first-class-support.md.
+    _check_trt_ep_load_chain(add)
+    # ──────────────────────────────────────────────────────────────────
 
     # Disk space at /tmp (used for transient export intermediates only — the
     # actual model export cache lives at ~/.cache/reflex/exports). On many
