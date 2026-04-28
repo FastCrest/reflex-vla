@@ -144,6 +144,25 @@ if [ -z "$EXTRAS" ]; then
 fi
 echo
 
+# -- Ensure pip is available --------------------------------------------------
+if ! "$PYTHON" -m pip --version >/dev/null 2>&1; then
+  warn "pip not available for $PYTHON — trying to bootstrap via ensurepip"
+  if "$PYTHON" -m ensurepip --upgrade >/dev/null 2>&1; then
+    ok "Installed pip via ensurepip"
+  else
+    fail "pip is missing and ensurepip can't bootstrap it on this system."
+    echo
+    info "Install pip for your distro, then re-run this installer:"
+    note "  Arch:    sudo pacman -S python-pip"
+    note "  Debian:  sudo apt install python3-pip"
+    note "  Fedora:  sudo dnf install python3-pip"
+    note "  Alpine:  sudo apk add py3-pip"
+    note "  macOS:   pip ships with the Python.org installer / Homebrew Python"
+    echo
+    exit 1
+  fi
+fi
+
 # -- Run pip install ----------------------------------------------------------
 PIP_TARGET="reflex-vla[$EXTRAS]"
 info "Installing: $PIP_TARGET"
