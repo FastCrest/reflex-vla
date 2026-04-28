@@ -52,10 +52,18 @@ def _warn_rtc_horizon_migration(
         embodiment, source_path or "(in-memory)", old_value, new_value, chunk_size,
     )
 
-# Repo-relative path to preset JSONs. Relative to the repo root, NOT this
-# file (the JSONs live under configs/embodiments/, outside the package).
-_REPO_ROOT = Path(__file__).resolve().parents[3]  # src/reflex/embodiments/__init__.py → repo
-_PRESETS_DIR = _REPO_ROOT / "configs" / "embodiments"
+# Embodiment preset JSONs are bundled INSIDE the package so they ship with
+# `pip install reflex-vla` (since v0.5.2). For dev workflows the repo also
+# keeps editable copies in <repo>/configs/embodiments/ — those are checked
+# as a fallback when running from source if the in-package presets are
+# missing for some reason. Canonical runtime location is the package.
+_PRESETS_DIR = Path(__file__).parent / "presets"
+
+# Dev fallback: the editable copies in the repo (only used when the in-package
+# presets dir doesn't exist, which shouldn't happen in a proper install).
+_DEV_PRESETS_DIR = Path(__file__).resolve().parents[3] / "configs" / "embodiments"
+if not _PRESETS_DIR.exists() and _DEV_PRESETS_DIR.exists():
+    _PRESETS_DIR = _DEV_PRESETS_DIR
 
 # Path to the JSON schema file (lives inside the package).
 _SCHEMA_PATH = Path(__file__).parent / "schema.json"

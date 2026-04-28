@@ -1,0 +1,92 @@
+{
+  "schema_version": 1,
+  "embodiment": "franka",
+  "action_space": {
+    "type": "continuous",
+    "dim": 7,
+    "ranges": [
+      [
+        -2.8973,
+        2.8973
+      ],
+      [
+        -1.7628,
+        1.7628
+      ],
+      [
+        -2.8973,
+        2.8973
+      ],
+      [
+        -3.0718,
+        -0.0698
+      ],
+      [
+        -2.8973,
+        2.8973
+      ],
+      [
+        -0.0175,
+        3.7525
+      ],
+      [
+        0.0,
+        1.0
+      ]
+    ]
+  },
+  "normalization": {
+    "mean_action": [
+      0.0,
+      0.0,
+      0.0,
+      -1.5,
+      0.0,
+      1.5,
+      0.5
+    ],
+    "std_action": [
+      0.5,
+      0.5,
+      0.5,
+      0.5,
+      0.5,
+      0.5,
+      0.25
+    ],
+    "mean_state": [
+      0.5,
+      0.0
+    ],
+    "std_state": [
+      0.25,
+      0.25
+    ]
+  },
+  "gripper": {
+    "component_idx": 6,
+    "close_threshold": 0.5,
+    "inverted": false
+  },
+  "cameras": [
+    {
+      "name": "wrist",
+      "resolution": [
+        640,
+        480
+      ],
+      "fps": 30.0,
+      "color_space": "rgb8"
+    }
+  ],
+  "control": {
+    "frequency_hz": 20.0,
+    "chunk_size": 50,
+    "rtc_execution_horizon": 0.5
+  },
+  "constraints": {
+    "max_ee_velocity": 1.0,
+    "max_gripper_velocity": 1.0,
+    "collision_check": true
+  }
+}

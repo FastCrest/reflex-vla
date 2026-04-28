@@ -1,5 +1,18 @@
 # Changelog
 
+## v0.5.2 — 2026-04-28
+
+Embodiment presets ship in the package now.
+
+### Fixed
+- **Embodiment preset JSONs (`franka`, `so100`, `ur5`) now ship inside the package** at `reflex/embodiments/presets/`. Before v0.5.2 these lived only in `<repo>/configs/embodiments/` outside the package — so `pip install`ed users running `reflex go --embodiment franka` (which is the example in the README) hit `Unknown embodiment preset 'franka'. Available: (none)`. Caught within the first hour of public install (Rob, RTX 5090 testing run).
+- **`pyproject.toml` now explicitly force-includes** `src/reflex/embodiments/presets/` in the wheel via `[tool.hatch.build.targets.wheel.force-include]` so the JSONs are guaranteed to ship.
+- **Dev-mode fallback**: when running from a source checkout (editable install) and the bundled presets dir is missing for any reason, falls back to `<repo>/configs/embodiments/`. Keeps the dev workflow working.
+
+### Notes
+- No behavioral changes to embodiment loading or normalization — just package bundling.
+- Embodiment is still optional: `reflex go --model X` (no `--embodiment`) works for testing without normalization.
+
 ## v0.5.1 — 2026-04-28
 
 First-tester polish — bugs caught within the first hour of public install.
