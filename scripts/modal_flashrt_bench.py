@@ -1,9 +1,13 @@
-"""Modal: build + bench FlashRT public Python version on A100.
+"""Modal: build + bench FlashRT public Python version on L40S.
 
-Validates LiangSu8899/FlashRT's 18× JAX baseline claim on shared hardware
-(A100, vs their Thor + 5090 + 4090 published numbers). Establishes
-reflex-vla's baseline before Liang's pure-C++ pi05 binary arrives ~2026-05-06
-for the `--runtime flashrt` integration spike.
+Validates LiangSu8899/FlashRT's 18× JAX baseline claim on Modal-available
+Ada-class hardware (L40S = SM89, same arch as RTX 4090). Initial attempt
+on A100 (SM80) failed: FlashRT's Pi0.5 RTX frontend uses
+torch.float8_e4m3fn which requires SM89+ tensor cores. L40S is the
+closest Modal-available match to FlashRT's published 4090 numbers.
+
+Establishes reflex-vla's reference before Liang's pure-C++ pi05 binary
+arrives ~2026-05-06 for the `--runtime flashrt` integration spike.
 
 Per 2026-04-29 Discord exchange + competitor profile
 `reflex_context/02_research/competitors/flashrt.md`.
@@ -108,22 +112,24 @@ image = (
         "git clone --depth 1 --branch v4.4.2 "
         "  https://github.com/NVIDIA/cutlass.git third_party/cutlass && "
         "mkdir -p build && cd build && "
-        # SM80 = A100, SM86 = A10/A10G, SM89 = 4090, SM120 = 5090.
-        # Building only SM80 to keep compile time manageable on first run.
+        # SM80 = A100 (no FP8), SM86 = A10/A10G (no FP8), SM89 = 4090/L40S (FP8 native),
+        # SM110 = Thor, SM120 = 5090. FlashRT's pi0.5 frontend requires SM89+
+        # for FP8 tensor cores (torch.float8_e4m3fn). Building only SM89 to
+        # match L40S target.
         "cmake .. -GNinja "
         "  -DCMAKE_BUILD_TYPE=Release "
-        "  -DCMAKE_CUDA_ARCHITECTURES=80 "
+        "  -DCMAKE_CUDA_ARCHITECTURES=89 "
         "  -DENABLE_FA2=ON && "
         "ninja -j$(nproc) && "
         f"cd {FLASHRT_DIR} && pip install -e '.[torch]'",
-        gpu="A100-80GB",  # cmake reads $CUDA_ARCH_LIST + needs nvcc; build on GPU
+        gpu="L40S",  # cmake reads $CUDA_ARCH_LIST + needs nvcc; build on GPU
     )
 )
 
 
 @app.function(
     image=image,
-    gpu="A100-80GB",
+    gpu="L40S",  # SM89 — closest Modal-available match to FlashRT's published 4090 numbers
     volumes={HF_CACHE: hf_cache, FLASHRT_DIR + "_cache": flashrt_cache},
     secrets=[_hf_secret()],
     timeout=2400,  # 40 min hard cap
@@ -148,7 +154,7 @@ def bench(
     from pathlib import Path
 
     print("=" * 60)
-    print("FlashRT bench on A100-80GB")
+    print("FlashRT bench on L40S (SM89)")
     print(f"checkpoint: {checkpoint_id}")
     print(f"benchmark_iters: {benchmark_iters}, warmup: {warmup_iters}")
     print(f"num_views: {num_views}")
@@ -223,11 +229,13 @@ def bench(
     print(f"    OFF: 270.85 ms / chunk")
     print(f"    ON:  207.74 ms / chunk (1.30x speedup)")
     print(f"  See reflex_context/03_experiments/2026-04-29-cuda-graphs-ab-modal-a100.md")
+    print(f"  (note: A100 ≠ this L40S run — separate L40S A/B needed for true apples-to-apples)")
     print(f"")
-    print(f"  FlashRT published numbers:")
+    print(f"  FlashRT published numbers (Ada-class):")
+    print(f"    Pi0.5 RTX 4090: published reference (Liang's repo)")
     print(f"    Pi0.5 RTX 5090: 17.58 ms (57 Hz)")
     print(f"    Pi0.5 Thor:     44 ms / 39.78 ms NVFP4")
-    print(f"    A100: not published, this run is the first reference")
+    print(f"    L40S: not published, this run is the first reference")
 
     return {
         "status": "ok",
