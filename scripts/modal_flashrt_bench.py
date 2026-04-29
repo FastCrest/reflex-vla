@@ -29,12 +29,10 @@ app = modal.App("flashrt-bench")
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
-def _build_bust() -> str:
-    import time
-    return str(int(time.time()))
-
-
-_BUILD_BUST = _build_bust()
+# Locked to v5's exact build-bust value so v6+ hit the cached FA2 build
+# (60 min compile worth ~$4 on L40S). Bump to a new string when you want
+# to force a fresh FlashRT git clone + rebuild (e.g., new upstream HEAD).
+_BUILD_BUST = "1777491975"
 
 
 def _hf_secret():
@@ -129,6 +127,12 @@ image = (
         f"cd {FLASHRT_DIR} && pip install -e '.[torch]'",
         gpu="L40S",  # cmake reads $CUDA_ARCH_LIST + needs nvcc; build on GPU
     )
+    # Late-stage deps that aren't in FlashRT's pyproject extras.
+    # Kept in a separate pip_install AFTER the run_commands so adding
+    # them doesn't invalidate the expensive FA2 build cache.
+    # ml_dtypes is required by flash_vla.models.pi05.pipeline_rtx (line 45);
+    # surfaced via v5's GPU_FAIL.
+    .pip_install("ml_dtypes")
 )
 
 
@@ -166,9 +170,8 @@ def bench(
     print("=" * 60)
 
     # ---- 1. Verify FlashRT is built + importable ----
-    # The compiled kernels (flash_vla_kernels.so, flash_vla_fa2.so) are
-    # loaded internally by frontends; not exposed at the package top level.
-    # Public surface = flash_vla.load_model + flash_vla.VLAModel only.
+    # Public surface = flash_vla.load_model + flash_vla.VLAModel only;
+    # compiled .so kernels are loaded internally by frontends.
     print("\n[1/4] verifying flash_vla import...", flush=True)
     try:
         import flash_vla
@@ -176,12 +179,6 @@ def bench(
         assert hasattr(flash_vla, "load_model"), "flash_vla.load_model missing"
         assert hasattr(flash_vla, "VLAModel"), "flash_vla.VLAModel missing"
         print(f"  flash_vla.load_model + VLAModel exposed OK")
-        # Confirm the .so kernels were built + reachable from the install path.
-        import importlib.util
-        kernels_spec = importlib.util.find_spec("flash_vla.flash_vla_kernels")
-        fa2_spec = importlib.util.find_spec("flash_vla.flash_vla_fa2")
-        print(f"  flash_vla_kernels.so: {'found' if kernels_spec else 'MISSING'}")
-        print(f"  flash_vla_fa2.so:     {'found' if fa2_spec else 'MISSING'}")
     except Exception as exc:
         return {"status": "fail", "stage": "import", "error": repr(exc)}
 
