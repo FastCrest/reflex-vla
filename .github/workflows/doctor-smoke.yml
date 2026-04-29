@@ -53,9 +53,16 @@ jobs:
         id: version
         shell: bash
         run: |
-          # Extract version from pyproject.toml (must match __init__.py)
-          VERSION=$(python -c "import tomllib; print(tomllib.load(open('pyproject.toml','rb'))['project']['version'])" 2>/dev/null || \
-                   python -c "import tomli; print(tomli.load(open('pyproject.toml','rb'))['project']['version'])")
+          # Extract version from pyproject.toml. Regex grep avoids the py3.10
+          # tomllib/tomli dependency mess (tomllib is py3.11+; tomli isn't pre-
+          # installed on GHA runners). The pyproject version line is stable
+          # enough to grep.
+          VERSION=$(grep -E '^version *= *"' pyproject.toml | head -1 | sed -E 's/^version *= *"([^"]+)".*/\1/')
+          if [ -z "$VERSION" ]; then
+            echo "FAIL: could not extract version from pyproject.toml"
+            grep -E '^version' pyproject.toml || true
+            exit 1
+          fi
           echo "expected=$VERSION" >> "$GITHUB_OUTPUT"
           echo "Expected version: $VERSION"
 
