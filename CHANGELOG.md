@@ -1,5 +1,34 @@
 # Changelog
 
+## v0.7.1 — 2026-04-29
+
+Surfaces the previously-silent `--cuda-graphs` flag with measured A100 + A10G perf numbers. The flag has been in main since v0.5.0 (commits `49110d2` → `7dfcab6`, April 24-25) but no CHANGELOG entry told users it existed. v0.7.1 fixes that.
+
+### Documented (no new code, surfacing existing capability)
+- **`reflex serve --cuda-graphs`** — opt-in CUDA graph capture for the decomposed pi0.5 path (`vlm_prefix.onnx` + `expert_denoise.onnx`). Captures both ONNX sessions at startup using ORT's `enable_cuda_graph=1` + replays for every subsequent request. Skips per-op kernel-launch overhead.
+- **Measured speedup on A100-80GB (pi0.5 num_steps=10, n=200 paired iterations, 5 warmup discarded):**
+  - Per-chunk latency: 270.85 ms → 207.74 ms = **1.30× speedup, p99 304 → 212 ms (-30%)**
+  - `vlm_prefix`: 93.45 → 87.34 ms (1.07× mean, jitter 1.4× tighter)
+  - `expert_denoise` (runs 10× per chunk): 17.74 → 12.04 ms (**1.47× mean, p99 -40%, jitter 4.1× tighter**)
+- **Measured speedup on A10G (n=100 paired):**
+  - `expert_denoise`: 12.34 → 10.47 ms (**1.18× mean, p99 -35%, jitter 14× tighter**)
+  - `vlm_prefix`: capacity-bounded — capture buffer doesn't fit alongside working memory on A10G's 24 GB envelope. Wrapper gracefully degrades to eager per ADR `2026-04-24-cuda-graphs-architecture` decision #5 (tier-aware semantics). Same numerics, no perf change for that session, expert still wins.
+- **`reflex doctor` cuda-graphs diagnostic** — `tests/test_check_cuda_graphs.py` (already in v0.5.0+) checks `vlm_prefix` + `expert_denoise` capture status. Surface with `reflex doctor` after running `reflex serve --cuda-graphs` to verify capture on your hardware.
+- **Customer-facing docs** at `docs/cuda_graphs.md` (already in v0.5.0+) — when to enable, hardware tier matrix, what metrics to watch (`reflex_cuda_graph_captured_total` / `reflex_cuda_graph_replayed_total` / `reflex_cuda_graph_eager_fallback_total` / `reflex_cuda_graph_capture_failed_at_init_total` / `reflex_cuda_graph_capture_seconds`).
+
+### Added (this release)
+- **`tests/test_cuda_graphs_integration.py`** (Day 7 of cuda-graphs plan) — 7 mock-based + 1 CUDA-gated integration tests covering create_app flag propagation, legacy ReflexServer no-op log, Pi05DecomposedInference provider wiring, capture-failed-at-init eager fallback, /metrics endpoint counter exposure, and label cardinality bound. The CUDA-gated test runs on Modal A10G/A100; mock-based tests run anywhere.
+- **`scripts/modal_cuda_graphs_ab.py`** — Day 8-9 A/B benchmark script. Loads a decomposed export from the `pi0-onnx-outputs` Modal volume, runs N iterations OFF (eager) + N iterations ON (cuda-graphs) for each session (`vlm_prefix` + `expert_denoise`), computes ISB-1 stats with 5 warmup discarded + 95% CI on means, writes JSON output to volume. 30s progress logging so degenerate runs are catchable mid-flight.
+
+### Notes
+- **The `--cuda-graphs` flag was never deprecated, hidden, or feature-flagged.** It was always live in `reflex serve --help` since v0.5.0. v0.7.1 simply documents it with measured numbers.
+- **Hardware tier guidance:**
+  - A100 / H100: capture both sessions (1.30× per-chunk)
+  - A10G: capture expert_denoise only (1.18× expert mean, vlm_prefix gracefully degrades to eager)
+  - Orin Nano / smaller: not yet measured. Try with `reflex doctor` to check if your GPU has headroom.
+- **Why the win shape is "predictability > raw speed":** robotics control loops care about p99 + jitter more than mean. CUDA graph replay eliminates per-op kernel-launch jitter; the means are smaller wins because ORT already uses fused cuBLAS kernels for the heavy ops.
+- **Validation experiments:** Modal app URLs in the Reflex context vault at `reflex_context/03_experiments/2026-04-29-cuda-graphs-ab-modal-a10g.md` + `2026-04-29-cuda-graphs-ab-modal-a100.md`. Total Modal cost: $3.50.
+
 ## v0.7.0 — 2026-04-29
 
 ORT-TensorRT execution provider first-class support. Most users now get the **5.55× speedup** measured on Modal A10G (108.11 ms → 19.49 ms on SmolVLA monolithic, 2026-04-29) automatically — without manual `LD_LIBRARY_PATH` setup.
