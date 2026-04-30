@@ -29,7 +29,7 @@ jobs:
           python -m pip install --upgrade pip
           # Install core + dev + onnx (for lightweight CI tests)
           # We use editable install to ensure the src/ folder is correctly picked up
-          pip install -e ".[dev,onnx]"
+          pip install -e ".[dev,onnx,serve]"
 
       - name: Run tests
         run: |
