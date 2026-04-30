@@ -230,6 +230,20 @@ class Pi05DecomposedInference:
         self._past_kv_names: list[str] = self.config["decomposed"]["past_kv_tensor_names"]
         self._n_layers: int = self.config["decomposed"]["paligemma_layers"]
 
+        # Per-step expert detection. When True, expert_denoise.onnx takes
+        # (x_t, t, past_kv) → v_t and we drive the Euler loop in Python.
+        # When False (default), it's the baked-loop shape (noise → actions,
+        # single call). Spec: features/03_export/per-step-expert-export.md.
+        self._per_step_expert: bool = bool(
+            self.config["decomposed"].get("per_step_expert", False)
+        )
+        self._num_steps: int = int(self.config.get("num_denoising_steps", 1))
+        if self._per_step_expert:
+            logger.info(
+                "Pi05DecomposedInference: per-step expert path active "
+                "(num_steps=%d, Python Euler loop)", self._num_steps,
+            )
+
         prefix_path = self.export_dir / self.config["decomposed"]["vlm_prefix_onnx"]
         expert_path = self.export_dir / self.config["decomposed"]["expert_denoise_onnx"]
         logger.info("ONNXRuntime available providers: %s", ort.get_available_providers())
@@ -424,9 +438,8 @@ class Pi05DecomposedInference:
             lang_hash=lang_hash,
         )
 
-        expert_feed = {name: past_kv[i] for i, name in enumerate(self._past_kv_names)}
-        expert_feed["prefix_pad_masks"] = prefix_pad
-        expert_feed["noise"] = noise.astype(np.float32, copy=False)
+        expert_feed_base = {name: past_kv[i] for i, name in enumerate(self._past_kv_names)}
+        expert_feed_base["prefix_pad_masks"] = prefix_pad
         # v0.5 state-out: expert ONNX has a 'state' input. Pad to
         # max_state_dim if caller passed a shorter vector.
         if self.config.get("decomposed", {}).get("expert_takes_state"):
@@ -446,11 +459,9 @@ class Pi05DecomposedInference:
                     dtype=state_arr.dtype,
                 )
                 state_arr = np.concatenate([state_arr, pad], axis=-1)
-            expert_feed["state"] = state_arr
+            expert_feed_base["state"] = state_arr
 
-        actions = self._sess_expert.run(["actions"], expert_feed)[0]
-        if actions.dtype != np.float32:
-            actions = actions.astype(np.float32)
+        actions = self._run_expert(expert_feed_base, noise)
 
         # ---- Populate action cache -------------------------------------
         if self.cache_level == "action":
@@ -462,6 +473,46 @@ class Pi05DecomposedInference:
             )
 
         return actions
+
+    def _run_expert(
+        self,
+        expert_feed_base: dict[str, np.ndarray],
+        noise: np.ndarray,
+    ) -> np.ndarray:
+        """Dispatch to either the baked-loop expert (single ORT call returning
+        actions) or the per-step expert (N ORT calls in a Python Euler loop,
+        returning velocity per step). Choice is made at export time and
+        recorded in ``reflex_config.json:decomposed.per_step_expert``.
+
+        See features/03_export/per-step-expert-export.md for the contract.
+        """
+        if not self._per_step_expert:
+            # Baked-loop path (the shipped default).
+            expert_feed = dict(expert_feed_base)
+            expert_feed["noise"] = noise.astype(np.float32, copy=False)
+            actions = self._sess_expert.run(["actions"], expert_feed)[0]
+            if actions.dtype != np.float32:
+                actions = actions.astype(np.float32)
+            return actions
+
+        # Per-step path: drive the Euler loop in Python, calling the ONNX
+        # once per step. Matches OpenPI's externalized loop pattern (see
+        # research sidecar Lens 1).
+        n = self._num_steps
+        dt = -1.0 / n
+        x_t = noise.astype(np.float32, copy=False)
+        B = x_t.shape[0]
+        for step in range(n):
+            time_val = 1.0 + step * dt
+            t_tensor = np.full((B,), time_val, dtype=np.float32)
+            expert_feed = dict(expert_feed_base)
+            expert_feed["x_t"] = x_t
+            expert_feed["t"] = t_tensor
+            v_t = self._sess_expert.run(["v_t"], expert_feed)[0]
+            if v_t.dtype != np.float32:
+                v_t = v_t.astype(np.float32)
+            x_t = x_t + dt * v_t
+        return x_t
 
     def reset_cache(self) -> None:
         """Drop any cached VLM output. Call between episodes so cross-task
@@ -511,10 +562,10 @@ class Pi05DecomposedInference:
             prefix_pad = prefix_out[-1]
             self._episode_cache.insert(episode_id, lang_tokens, past_kv, prefix_pad)
 
-        # Build expert feed (same as non-episode path)
-        expert_feed = {name: past_kv[i] for i, name in enumerate(self._past_kv_names)}
-        expert_feed["prefix_pad_masks"] = prefix_pad
-        expert_feed["noise"] = noise.astype(np.float32, copy=False)
+        # Build expert feed base (everything except noise/x_t/t which the
+        # per-step path injects per Euler step). Mirror non-episode path.
+        expert_feed_base = {name: past_kv[i] for i, name in enumerate(self._past_kv_names)}
+        expert_feed_base["prefix_pad_masks"] = prefix_pad
         if self.config.get("decomposed", {}).get("expert_takes_state"):
             if state is None:
                 raise ValueError(
@@ -531,11 +582,9 @@ class Pi05DecomposedInference:
                     dtype=state_arr.dtype,
                 )
                 state_arr = np.concatenate([state_arr, pad], axis=-1)
-            expert_feed["state"] = state_arr
+            expert_feed_base["state"] = state_arr
 
-        actions = self._sess_expert.run(["actions"], expert_feed)[0]
-        if actions.dtype != np.float32:
-            actions = actions.astype(np.float32)
+        actions = self._run_expert(expert_feed_base, noise)
         return actions
 
     # ---- Cache machinery --------------------------------------------

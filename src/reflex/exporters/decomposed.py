@@ -97,6 +97,7 @@ def export_pi05_decomposed(
     student_checkpoint: str | Path | None = None,
     variant: str = "default",
     export_mode: ExportMode | str = ExportMode.AUTO,
+    per_step_expert: bool = False,
 ) -> dict[str, Any]:
     """Export pi0.5 as ``vlm_prefix.onnx`` + ``expert_denoise.onnx``.
 
@@ -108,6 +109,8 @@ def export_pi05_decomposed(
         num_steps: denoising steps baked into expert_denoise.onnx.
             1 for distilled students (target_time=1 path); 10 for the
             canonical teacher.
+            When ``per_step_expert=True`` this only configures runtime
+            metadata; the export itself is single-step regardless.
         target: target hardware profile; passed through to reflex_config.
         student_checkpoint: optional path to a SnapFlow-distilled
             checkpoint dir. When set, loads via ``load_snapflow_student``
@@ -117,6 +120,13 @@ def export_pi05_decomposed(
             two independent policy loads fit. ``parallel`` fails loudly if
             the probe says it will not fit. ``sequential`` preserves the
             historical single-process export path.
+        per_step_expert: when True, export the expert as a single-Euler-step
+            graph ``(x_t, t, past_kv) → v_t`` instead of unrolling the loop
+            into the ONNX. The runtime drives the Euler loop in Python,
+            unlocking RTC's per-step guidance hook. Default False preserves
+            the baked-loop shape that's been the customer-facing default
+            since the decomposed export shipped. Spec:
+            ``reflex_context/features/03_export/per-step-expert-export.md``.
 
     Returns dict with paths + byte sizes + sanity metadata.
     """
@@ -137,6 +147,7 @@ def export_pi05_decomposed(
             student_checkpoint=student_checkpoint,
             variant=variant,
             export_mode_reason=decision.reason,
+            per_step_expert=per_step_expert,
         )
 
     return _export_pi05_decomposed_sequential(
@@ -147,6 +158,7 @@ def export_pi05_decomposed(
         student_checkpoint=student_checkpoint,
         variant=variant,
         export_mode_reason=decision.reason,
+        per_step_expert=per_step_expert,
     )
 
 
@@ -159,6 +171,7 @@ def _export_pi05_decomposed_sequential(
     student_checkpoint: str | Path | None,
     variant: str,
     export_mode_reason: str,
+    per_step_expert: bool = False,
 ) -> dict[str, Any]:
     """Historical pi0.5 decomposed export path: one policy load, two passes."""
     policy = _load_pi05_policy(model_id, num_steps, student_checkpoint, variant)
@@ -177,6 +190,7 @@ def _export_pi05_decomposed_sequential(
         output_dir=output_dir,
         num_steps=num_steps,
         variant=variant,
+        per_step_expert=per_step_expert,
         past_kv_names=past_kv_names,
         prefix_seq_len=prefix_seq_len,
     )
@@ -194,6 +208,7 @@ def _export_pi05_decomposed_sequential(
         action_dim=int(prefix_meta["action_dim"]),
         export_mode=ExportMode.SEQUENTIAL,
         export_mode_reason=export_mode_reason,
+        per_step_expert=per_step_expert,
     )
 
 
@@ -206,6 +221,7 @@ def _export_pi05_decomposed_parallel(
     student_checkpoint: str | Path | None,
     variant: str,
     export_mode_reason: str,
+    per_step_expert: bool = False,
 ) -> dict[str, Any]:
     """Run prefix and expert export in separate spawned processes."""
     past_kv_names = _past_kv_names()
@@ -218,6 +234,7 @@ def _export_pi05_decomposed_parallel(
         variant=variant,
         past_kv_names=past_kv_names,
         prefix_seq_len=prefix_seq_len,
+        per_step_expert=per_step_expert,
     )
     _assert_matching_export_metadata(prefix_meta, expert_meta)
 
@@ -233,6 +250,7 @@ def _export_pi05_decomposed_parallel(
         action_dim=int(prefix_meta["action_dim"]),
         export_mode=ExportMode.PARALLEL,
         export_mode_reason=export_mode_reason,
+        per_step_expert=per_step_expert,
     )
 
 
@@ -245,6 +263,7 @@ def _run_parallel_pi05_exports(
     variant: str,
     past_kv_names: list[str],
     prefix_seq_len: int,
+    per_step_expert: bool = False,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     """Submit the two independent export passes to spawned worker processes."""
     ctx = mp.get_context("spawn")
@@ -268,6 +287,7 @@ def _run_parallel_pi05_exports(
             variant,
             past_kv_names,
             prefix_seq_len,
+            per_step_expert,
         )
         return prefix_future.result(), expert_future.result()
 
@@ -292,6 +312,7 @@ def _export_pi05_expert_worker(
     variant: str,
     past_kv_names: list[str],
     prefix_seq_len: int,
+    per_step_expert: bool = False,
 ) -> dict[str, Any]:
     policy = _load_pi05_policy(model_id, num_steps, student_checkpoint, variant)
     return _export_pi05_expert_pass(
@@ -299,6 +320,7 @@ def _export_pi05_expert_worker(
         output_dir=Path(output_dir),
         num_steps=num_steps,
         variant=variant,
+        per_step_expert=per_step_expert,
         past_kv_names=past_kv_names,
         prefix_seq_len=prefix_seq_len,
     )
@@ -439,7 +461,19 @@ def _export_pi05_expert_pass(
     variant: str,
     past_kv_names: list[str],
     prefix_seq_len: int,
+    per_step_expert: bool = False,
 ) -> dict[str, Any]:
+    """Export the expert ONNX graph.
+
+    Two shapes:
+    - **baked-loop** (``per_step_expert=False``, default): single ONNX call
+      runs ``num_steps`` Euler iterations internally, returning fully-denoised
+      actions. Input ``noise``, output ``actions``.
+    - **per-step** (``per_step_expert=True``): single ONNX call runs ONE Euler
+      step, returning velocity ``v_t``. Caller drives the Euler loop in Python.
+      Input ``x_t`` + ``t``, output ``v_t``. Spec:
+      ``reflex_context/features/03_export/per-step-expert-export.md``.
+    """
     import torch
     from onnx_diagnostic.torch_export_patches import torch_export_patches
 
@@ -465,13 +499,26 @@ def _export_pi05_expert_pass(
     ]
     prefix_pad_masks_dummy = torch.ones(B, prefix_seq_len, dtype=torch.bool)
 
-    expert_wrapper = Pi05ExpertWrapper(policy.model, num_steps).eval()
+    if per_step_expert:
+        expert_wrapper = Pi05ExpertPerStepWrapper(policy.model).eval()
+    else:
+        expert_wrapper = Pi05ExpertWrapper(policy.model, num_steps).eval()
 
     expert_dummy = {}
     for idx, t in enumerate(past_kv_dummies):
         expert_dummy[past_kv_names[idx]] = t
     expert_dummy["prefix_pad_masks"] = prefix_pad_masks_dummy
-    expert_dummy["noise"] = torch.randn(B, chunk, action_dim, dtype=torch.float32)
+
+    if per_step_expert:
+        # Per-step shape: input is (x_t, t) instead of noise; output is v_t.
+        expert_dummy["x_t"] = torch.randn(B, chunk, action_dim, dtype=torch.float32)
+        # Scalar timestep, broadcast to (B,). Use t=1.0 (start of Euler trajectory).
+        expert_dummy["t"] = torch.full((B,), 1.0, dtype=torch.float32)
+        output_names = ["v_t"]
+    else:
+        expert_dummy["noise"] = torch.randn(B, chunk, action_dim, dtype=torch.float32)
+        output_names = ["actions"]
+
     if variant == "state_out":
         # Add state input to the expert ONNX graph (matches the runtime
         # signature of SnapFlowPI05StateOutPytorch.denoise_step).
@@ -479,7 +526,10 @@ def _export_pi05_expert_pass(
         expert_dummy["state"] = torch.randn(B, state_dim, dtype=torch.float32)
 
     expert_path = output_dir / "expert_denoise.onnx"
-    logger.info("[decomposed] Exporting expert (num_steps=%d) → %s", num_steps, expert_path)
+    shape_label = "per-step" if per_step_expert else f"baked num_steps={num_steps}"
+    logger.info(
+        "[decomposed] Exporting expert (%s) → %s", shape_label, expert_path,
+    )
     t0 = time.time()
     with torch_export_patches(patch_transformers=True):
         ep_expert = torch.export.export(
@@ -492,7 +542,7 @@ def _export_pi05_expert_pass(
     torch.onnx.export(
         ep_expert, tuple(expert_dummy.values()), str(expert_path),
         input_names=list(expert_dummy.keys()),
-        output_names=["actions"],
+        output_names=output_names,
         opset_version=19,
     )
     logger.info("[decomposed] expert ONNX conversion: %.1fs", time.time() - t0)
@@ -506,6 +556,7 @@ def _export_pi05_expert_pass(
         "action_dim": int(action_dim),
         "prefix_seq_len": int(prefix_seq_len),
         "expert_cast_fixes": int(expert_fixes),
+        "per_step_expert": bool(per_step_expert),
     }
 
 
@@ -522,6 +573,7 @@ def _write_decomposed_export_result(
     action_dim: int,
     export_mode: ExportMode,
     export_mode_reason: str,
+    per_step_expert: bool = False,
 ) -> dict[str, Any]:
     prefix_path = output_dir / "vlm_prefix.onnx"
     expert_path = output_dir / "expert_denoise.onnx"
@@ -547,6 +599,11 @@ def _write_decomposed_export_result(
             "past_kv_tensor_names": past_kv_names,
             "variant": variant,
             "expert_takes_state": variant == "state_out",
+            # When True, expert_denoise.onnx takes (x_t, t, past_kv) → v_t
+            # and the runtime drives the Euler loop in Python. Default False
+            # preserves the baked-loop shape (noise → actions, single call).
+            # Spec: features/03_export/per-step-expert-export.md.
+            "per_step_expert": bool(per_step_expert),
         },
     }
     (output_dir / "reflex_config.json").write_text(json.dumps(reflex_cfg, indent=2))
