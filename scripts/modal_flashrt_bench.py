@@ -29,10 +29,13 @@ app = modal.App("flashrt-bench")
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
-# Locked to v5's exact build-bust value so v6+ hit the cached FA2 build
-# (60 min compile worth ~$4 on L40S). Bump to a new string when you want
-# to force a fresh FlashRT git clone + rebuild (e.g., new upstream HEAD).
-_BUILD_BUST = "1777491975"
+# Bumped 2026-04-30 to pull Liang's latest HEAD with two fixes:
+# 1) HF pi model loader (norm_stats.json from lerobot/pi05_libero_finetuned_v044
+#    no longer raises FileNotFoundError)
+# 2) install.md compilation notes for FA2_ARCH_NATIVE_ONLY=ON
+# Plus Thor→N1.7 model update.
+# Bump again only when you need a fresh FlashRT git clone.
+_BUILD_BUST = "20260430-liang-hf-fix"
 
 
 def _hf_secret():
