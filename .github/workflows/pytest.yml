@@ -8,12 +8,13 @@ on:
 
 jobs:
   test:
-    name: pytest (${{ matrix.os }} py${{ matrix.python-version }})
-    runs-on: ${{ matrix.os }}
+    name: pytest (ubuntu py${{ matrix.python-version }})
+    runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest]
+        # Linux-only: every reflex tester runs Linux. Macs use the [onnx] extra
+        # path locally but CI doesn't add coverage there. Saves ~50% runner time.
         python-version: ["3.10", "3.12"]
 
     steps:
@@ -23,16 +24,22 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python-version }}
+          # Cache pip downloads keyed on pyproject.toml. Cuts ~3 min off
+          # subsequent runs since torch/onnxruntime/etc don't re-download.
+          cache: 'pip'
+          cache-dependency-path: 'pyproject.toml'
 
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          # Install core + dev + onnx (for lightweight CI tests)
-          # We use editable install to ensure the src/ folder is correctly picked up
+          # [serve] pulls fastapi/uvicorn/Pillow which the import + CLI tests need.
+          # We deliberately skip [gpu] since GitHub-hosted runners have no GPU
+          # and tensorrt is a 2 GB install for tests that would all skip via
+          # @pytest.mark.skipif anyway.
           pip install -e ".[dev,onnx,serve]"
 
       - name: Run tests
         run: |
-          # Run tests. Many hardware-specific tests will be skipped automatically
-          # via @pytest.mark.skipif in the codebase.
-          pytest tests/
+          # Hardware-specific tests skip automatically via @pytest.mark.skipif.
+          # CI coverage is the import + CLI + lazy-load + chat backend surface.
+          pytest tests/ -v

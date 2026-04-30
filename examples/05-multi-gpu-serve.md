@@ -120,11 +120,19 @@ Then point your proxy (NGINX, HAProxy, or an Envoy sidecar) to `localhost:8001` 
 
 ## Handling Warmup
 
-Reflex `serve` takes 10-70 seconds to build the TensorRT engine on its first boot. During this time, the `/health` endpoint returns `HTTP 503 Service Unavailable`.
+Reflex `serve` takes 30-60 seconds to build the TensorRT engine on its first boot (target floor: < 90s). During this time, the `/health` endpoint returns `HTTP 503 Service Unavailable`. Subsequent boots on the same hardware hit the engine cache and start in seconds.
 
-If you are using a standard load balancer, **ensure health checks are enabled and pointing to `/health`**. The load balancer will automatically hold traffic and keep the worker out of the active pool until the engine is built and `/health` returns `HTTP 200 OK`. 
+If you are using a standard load balancer, **ensure health checks are enabled and pointing to `/health`**. The load balancer will automatically hold traffic and keep the worker out of the active pool until the engine is built and `/health` returns `HTTP 200 OK`.
 
 ## Shared TRT Engine Caching
 
 If all GPUs are the identical architecture (e.g., all A10Gs), they can share the same TensorRT engine cache (`.trt_cache`).
 If your node has mixed GPUs (e.g., an RTX 4090 and an RTX 3090), you **must** separate the export directories or disable engine caching, as TensorRT engines are hard-tied to the specific GPU SM architecture they were compiled on.
+
+## When to use this vs `--policy-a` / `--policy-b`
+
+This pattern (process-per-GPU + load balancer) is for **horizontal scale-out**: serving the same model on N GPUs to handle more requests per second. Each worker is identical and statelessly load-balanced.
+
+`reflex serve --policy-a ./v1/ --policy-b ./v2/ --split 80` is a different pattern for **A/B testing two different models** on a single GPU with sticky-per-episode routing (same `episode_id` always lands on the same policy shard, preserving prefix cache and RTC state within an episode). Use this when you want to roll a new policy to a percentage of your fleet without breaking cache locality.
+
+The two patterns compose: you can run `--policy-a/--policy-b` A/B serve on each per-GPU worker if you need both horizontal scale and policy A/B testing on the same fleet.
