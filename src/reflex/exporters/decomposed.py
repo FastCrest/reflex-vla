@@ -622,8 +622,31 @@ class Pi05ExpertWrapper:
         return impl(pi05_model, num_steps)
 
 
+class Pi05ExpertPerStepWrapper:
+    """Per-step expert wrapper for pi0.5. Takes 36 flat past_kv tensors +
+    prefix_pad_masks + x_t + t (and optional state). Returns v_t — the
+    velocity from ONE denoise step, not the fully-denoised actions.
+
+    The runtime drives the Euler loop in Python:
+        for i in range(num_steps):
+            t = 1.0 + i × dt
+            v_t = expert_per_step(x_t, t, past_kv, ...)
+            x_t = x_t + v_t × dt
+
+    This unlocks RTC's per-step guidance hook (lerobot RTCProcessor.denoise_step)
+    + future per-step caching patterns (Dexmal D.8, sub-frame interpolation C.5).
+
+    See features/03_export/per-step-expert-export.md for the spec.
+    Used when ``export_pi05_decomposed(..., per_step_expert=True)``.
+    """
+    def __new__(cls, pi05_model):
+        impl = _build_expert_per_step_class()
+        return impl(pi05_model)
+
+
 _PREFIX_CLASS: Any = None
 _EXPERT_CLASS: Any = None
+_EXPERT_PER_STEP_CLASS: Any = None
 
 
 def _build_prefix_class():
@@ -785,6 +808,95 @@ def _build_expert_class():
     return _EXPERT_CLASS
 
 
+def _build_expert_per_step_class():
+    """Per-step wrapper factory — single Euler step, no internal loop.
+
+    Mirrors ``_build_expert_class()`` but the wrapper does ONE denoise step
+    per forward call instead of unrolling N steps into the ONNX graph. The
+    runtime drives the Euler loop in Python, calling this wrapper N times.
+
+    Spec: ``features/03_export/per-step-expert-export.md``
+    Research: ``features/03_export/per-step-expert-export_research.md``
+    """
+    global _EXPERT_PER_STEP_CLASS
+    if _EXPERT_PER_STEP_CLASS is not None:
+        return _EXPERT_PER_STEP_CLASS
+
+    import torch
+    import torch.nn as nn
+
+    class _Pi05ExpertPerStepWrapper(nn.Module):
+        """Single Euler step. Inputs: 36 past_kv tensors + prefix_pad_masks +
+        x_t (current latent shape (B, T, A)) + t (scalar timestep tensor (B,))
+        + optional state. Output: v_t (velocity at this step, shape (B, T, A)).
+
+        Per-step contract matches OpenPI Pi0
+        (``openpi/src/openpi/models_pytorch/pi0_pytorch.py:298-313``) — the
+        closest precedent. See research sidecar Lens 1 for the survey.
+        """
+
+        def __init__(self, pi05_model):
+            super().__init__()
+            self.model = pi05_model
+            # SnapFlow student path — pass target_time=1 to denoise_step.
+            self._is_snapflow = hasattr(pi05_model, "target_time_embed_mlp")
+            # v0.5 state-out path — model has explicit state_proj layer.
+            self._is_state_out = hasattr(pi05_model, "state_proj")
+
+        def forward(self, *args):
+            # args layout (default):    36 past_kv + prefix_pad_masks + x_t + t.
+            # args layout (state_out):  same + state tensor (last position).
+            past_flat = args[:PI05_PALIGEMMA_LAYERS * 2]
+            prefix_pad_masks = args[PI05_PALIGEMMA_LAYERS * 2]
+            x_t = args[PI05_PALIGEMMA_LAYERS * 2 + 1]
+            t = args[PI05_PALIGEMMA_LAYERS * 2 + 2]
+            state = args[PI05_PALIGEMMA_LAYERS * 2 + 3] if self._is_state_out else None
+
+            # Reconstruct DynamicCache identically to the baked-loop wrapper
+            # (see _Pi05ExpertWrapper above) — same source of past_kv, same
+            # layer-by-layer .update() pattern. Bit-for-bit equivalent.
+            from transformers.cache_utils import DynamicCache
+            past_kv = DynamicCache()
+            for i in range(PI05_PALIGEMMA_LAYERS):
+                past_kv.update(
+                    key_states=past_flat[2 * i],
+                    value_states=past_flat[2 * i + 1],
+                    layer_idx=i,
+                    cache_kwargs=None,
+                )
+
+            action_dtype = self.model.action_in_proj.weight.dtype
+            if x_t.dtype != action_dtype:
+                x_t = x_t.to(action_dtype)
+
+            # Single denoise step. No Euler accumulation — that's the caller's
+            # responsibility. Returning v_t (velocity), not actions.
+            state_kw = {"state": state} if self._is_state_out else {}
+            if self._is_snapflow:
+                target_time_tensor = torch.ones_like(t)
+                v_t = self.model.denoise_step(
+                    prefix_pad_masks=prefix_pad_masks,
+                    past_key_values=past_kv,
+                    x_t=x_t,
+                    timestep=t,
+                    target_time=target_time_tensor,
+                    **state_kw,
+                )
+            else:
+                v_t = self.model.denoise_step(
+                    prefix_pad_masks=prefix_pad_masks,
+                    past_key_values=past_kv,
+                    x_t=x_t,
+                    timestep=t,
+                    **state_kw,
+                )
+
+            return v_t
+
+    _EXPERT_PER_STEP_CLASS = _Pi05ExpertPerStepWrapper
+    return _EXPERT_PER_STEP_CLASS
+
+
 class _FlatCache:
     """Minimal DynamicCache-shaped shim that wraps a flat tuple of
     (K_0, V_0, K_1, V_1, ..., K_{N-1}, V_{N-1}) tensors. Exposes
@@ -816,5 +928,7 @@ __all__ = [
     "PI05_PALIGEMMA_LAYERS",
     "PI05_KV_HEADS",
     "PI05_HEAD_DIM",
+    "Pi05ExpertWrapper",
+    "Pi05ExpertPerStepWrapper",
     "export_pi05_decomposed",
 ]
