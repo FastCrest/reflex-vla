@@ -1,0 +1,38 @@
+name: Pytest CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    name: pytest (${{ matrix.os }} py${{ matrix.python-version }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+        python-version: ["3.10", "3.12"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          # Install core + dev + onnx (for lightweight CI tests)
+          # We use editable install to ensure the src/ folder is correctly picked up
+          pip install -e ".[dev,onnx]"
+
+      - name: Run tests
+        run: |
+          # Run tests. Many hardware-specific tests will be skipped automatically
+          # via @pytest.mark.skipif in the codebase.
+          pytest tests/
