@@ -1,0 +1,45 @@
+version: '3.8'
+
+services:
+  # The Load Balancer
+  nginx:
+    image: nginx:alpine
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./nginx.conf:/etc/nginx/nginx.conf:ro
+    depends_on:
+      - worker_0
+      - worker_1
+
+  # GPU 0 Worker
+  worker_0:
+    image: ghcr.io/rylinjames/reflex-vla:latest
+    command: reflex serve /exports/model --host 0.0.0.0 --port 8001
+    volumes:
+      - ./my_export:/exports/model:ro
+    environment:
+      - CUDA_VISIBLE_DEVICES=0
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: ['0']
+              capabilities: [gpu]
+
+  # GPU 1 Worker
+  worker_1:
+    image: ghcr.io/rylinjames/reflex-vla:latest
+    command: reflex serve /exports/model --host 0.0.0.0 --port 8002
+    volumes:
+      - ./my_export:/exports/model:ro
+    environment:
+      - CUDA_VISIBLE_DEVICES=1
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: ['1']
+              capabilities: [gpu]
