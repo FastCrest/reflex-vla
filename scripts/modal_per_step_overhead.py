@@ -195,30 +195,55 @@ def overhead_bench() -> dict:
 
     kv_names = _kv_names(PI05_PALIGEMMA_LAYERS)
 
-    def _build_baked_feed(noise):
-        f = {n: past_kvs[i] for i, n in enumerate(kv_names)}
-        f["prefix_pad_masks"] = prefix_pad_masks
-        f["noise"] = noise
-        return f
-
-    def _build_per_step_feed(x_t, t):
-        f = {n: past_kvs[i] for i, n in enumerate(kv_names)}
-        f["prefix_pad_masks"] = prefix_pad_masks
-        f["x_t"] = x_t
-        f["t"] = t
-        return f
+    # Pre-build the constant part of the per-step feed (past_kvs + prefix_pad_masks).
+    # Mirrors production runtime's `expert_feed_base` pattern in
+    # Pi05DecomposedInference.predict_action_chunk → _run_expert.
+    feed_base = {n: past_kvs[i] for i, n in enumerate(kv_names)}
+    feed_base["prefix_pad_masks"] = prefix_pad_masks
 
     def _run_baked(noise):
-        return sess_baked.run(["actions"], _build_baked_feed(noise))[0]
+        feed = dict(feed_base)
+        feed["noise"] = noise
+        return sess_baked.run(["actions"], feed)[0]
 
-    def _run_per_step(noise):
+    def _run_per_step_naive(noise):
+        """Production-style: dict copy per iter, no IOBinding. ORT re-copies
+        all 38 past_kv tensors host→device on every iter."""
         n = NUM_STEPS
         dt = -1.0 / n
         x_t = noise.copy()
         for step in range(n):
             time_val = 1.0 + step * dt
             t = np.full((B,), time_val, dtype=np.float32)
-            v_t = sess_per_step.run(["v_t"], _build_per_step_feed(x_t, t))[0]
+            feed = dict(feed_base)
+            feed["x_t"] = x_t
+            feed["t"] = t
+            v_t = sess_per_step.run(["v_t"], feed)[0]
+            x_t = x_t + dt * v_t
+        return x_t
+
+    def _run_per_step_iobinding(noise):
+        """IOBinding: pin past_kvs + prefix_pad_masks to device ONCE per chunk,
+        ORT skips the redundant host→device copies across the 10 Euler iters."""
+        n = NUM_STEPS
+        dt = -1.0 / n
+        x_t = noise.copy()
+        binding = sess_per_step.io_binding()
+        # Hold the device OrtValues alive — bind_ortvalue_input doesn't
+        # take ownership; if Python GC's them mid-loop, ORT segfaults.
+        device_kept_alive = []
+        for nm, arr in feed_base.items():
+            ortval = ort.OrtValue.ortvalue_from_numpy(arr, "cuda", 0)
+            binding.bind_ortvalue_input(nm, ortval)
+            device_kept_alive.append(ortval)
+        for step in range(n):
+            time_val = 1.0 + step * dt
+            t_arr = np.full((B,), time_val, dtype=np.float32)
+            binding.bind_cpu_input("x_t", x_t)
+            binding.bind_cpu_input("t", t_arr)
+            binding.bind_output("v_t", "cpu")
+            sess_per_step.run_with_iobinding(binding)
+            v_t = binding.get_outputs()[0].numpy()
             x_t = x_t + dt * v_t
         return x_t
 
@@ -235,18 +260,31 @@ def overhead_bench() -> dict:
         _ = _run_baked(noise)
         baked_times.append((time.perf_counter() - t0) * 1000)  # ms
 
-    log.info("Warming up per-step (%d iters × %d steps)", N_WARMUP, NUM_STEPS)
+    log.info("Warming up per-step naive (%d iters × %d steps)", N_WARMUP, NUM_STEPS)
     for _ in range(N_WARMUP):
         noise = rng.standard_normal((B, chunk, action_dim), dtype=np.float64).astype(np.float32)
-        _ = _run_per_step(noise)
+        _ = _run_per_step_naive(noise)
 
-    log.info("Benching per-step (N=%d × %d steps)", N_BENCH, NUM_STEPS)
-    per_step_times = []
+    log.info("Benching per-step naive (N=%d × %d steps)", N_BENCH, NUM_STEPS)
+    per_step_naive_times = []
     for i in range(N_BENCH):
         noise = rng.standard_normal((B, chunk, action_dim), dtype=np.float64).astype(np.float32)
         t0 = time.perf_counter()
-        _ = _run_per_step(noise)
-        per_step_times.append((time.perf_counter() - t0) * 1000)  # ms
+        _ = _run_per_step_naive(noise)
+        per_step_naive_times.append((time.perf_counter() - t0) * 1000)  # ms
+
+    log.info("Warming up per-step iobinding (%d iters × %d steps)", N_WARMUP, NUM_STEPS)
+    for _ in range(N_WARMUP):
+        noise = rng.standard_normal((B, chunk, action_dim), dtype=np.float64).astype(np.float32)
+        _ = _run_per_step_iobinding(noise)
+
+    log.info("Benching per-step iobinding (N=%d × %d steps)", N_BENCH, NUM_STEPS)
+    per_step_iob_times = []
+    for i in range(N_BENCH):
+        noise = rng.standard_normal((B, chunk, action_dim), dtype=np.float64).astype(np.float32)
+        t0 = time.perf_counter()
+        _ = _run_per_step_iobinding(noise)
+        per_step_iob_times.append((time.perf_counter() - t0) * 1000)  # ms
 
     def stats(arr):
         a = np.array(arr)
@@ -261,22 +299,33 @@ def overhead_bench() -> dict:
         }
 
     baked_stats = stats(baked_times)
-    per_step_stats = stats(per_step_times)
+    naive_stats = stats(per_step_naive_times)
+    iob_stats = stats(per_step_iob_times)
 
-    median_overhead_ms = per_step_stats["median_ms"] - baked_stats["median_ms"]
-    median_overhead_pct = (per_step_stats["median_ms"] / baked_stats["median_ms"]) - 1.0
-    p99_ratio = per_step_stats["p99_ms"] / baked_stats["p99_ms"]
+    def gate_eval(per_step_stats):
+        med_pct = (per_step_stats["median_ms"] / baked_stats["median_ms"]) - 1.0
+        p99r = per_step_stats["p99_ms"] / baked_stats["p99_ms"]
+        return {
+            "median_overhead_ms": per_step_stats["median_ms"] - baked_stats["median_ms"],
+            "median_overhead_pct": med_pct,
+            "p99_ratio": p99r,
+            "passes_median_gate": med_pct <= 0.20,
+            "passes_p99_gate": p99r <= 1.30,
+            "passes_overall": med_pct <= 0.20 and p99r <= 1.30,
+        }
 
-    passes_median = median_overhead_pct <= 0.20
-    passes_p99 = p99_ratio <= 1.30
-    passes_overall = passes_median and passes_p99
+    naive_gate = gate_eval(naive_stats)
+    iob_gate = gate_eval(iob_stats)
 
-    log.info("BAKED median=%.2fms p99=%.2fms", baked_stats["median_ms"], baked_stats["p99_ms"])
-    log.info("PER-STEP median=%.2fms p99=%.2fms", per_step_stats["median_ms"], per_step_stats["p99_ms"])
-    log.info("Median overhead: %+.2fms (%+.1f%%)", median_overhead_ms, median_overhead_pct * 100)
-    log.info("p99 ratio: %.2fx", p99_ratio)
-    log.info("Passes: median<=20%% : %s | p99<=1.30x : %s | OVERALL: %s",
-             passes_median, passes_p99, passes_overall)
+    log.info("BAKED                median=%.2fms p99=%.2fms", baked_stats["median_ms"], baked_stats["p99_ms"])
+    log.info("PER-STEP NAIVE       median=%.2fms p99=%.2fms (overhead %+.1f%%, p99 %.2fx, gate %s)",
+             naive_stats["median_ms"], naive_stats["p99_ms"],
+             naive_gate["median_overhead_pct"] * 100, naive_gate["p99_ratio"],
+             "PASS" if naive_gate["passes_overall"] else "FAIL")
+    log.info("PER-STEP IOBINDING   median=%.2fms p99=%.2fms (overhead %+.1f%%, p99 %.2fx, gate %s)",
+             iob_stats["median_ms"], iob_stats["p99_ms"],
+             iob_gate["median_overhead_pct"] * 100, iob_gate["p99_ratio"],
+             "PASS" if iob_gate["passes_overall"] else "FAIL")
 
     return {
         "n_warmup": N_WARMUP,
@@ -284,14 +333,14 @@ def overhead_bench() -> dict:
         "num_steps": NUM_STEPS,
         "providers": {"baked": actual_baked, "per_step": actual_per_step},
         "baked": baked_stats,
-        "per_step": per_step_stats,
-        "median_overhead_ms": median_overhead_ms,
-        "median_overhead_pct": median_overhead_pct,
-        "p99_ratio": p99_ratio,
-        "passes_median_gate": passes_median,
-        "passes_p99_gate": passes_p99,
-        "passes_overall": passes_overall,
+        "per_step_naive": naive_stats,
+        "per_step_iobinding": iob_stats,
+        "naive_gate": naive_gate,
+        "iobinding_gate": iob_gate,
         "thresholds": {"median_overhead_pct_max": 0.20, "p99_ratio_max": 1.30},
+        # Top-level "passes_overall" reflects the IOBinding path since that's
+        # what production runtime should adopt if it passes.
+        "passes_overall": iob_gate["passes_overall"],
     }
 
 
@@ -311,12 +360,13 @@ def main():
     print("\n" + "=" * 60)
     print("RESULTS")
     print("=" * 60)
-    print(f"  baked:    median={result['baked']['median_ms']:.2f}ms  "
-          f"p95={result['baked']['p95_ms']:.2f}ms  p99={result['baked']['p99_ms']:.2f}ms")
-    print(f"  per-step: median={result['per_step']['median_ms']:.2f}ms  "
-          f"p95={result['per_step']['p95_ms']:.2f}ms  p99={result['per_step']['p99_ms']:.2f}ms")
-    print(f"  overhead: {result['median_overhead_ms']:+.2f}ms median "
-          f"({result['median_overhead_pct'] * 100:+.1f}%)")
-    print(f"  p99 ratio: {result['p99_ratio']:.2f}x")
-    print(f"\n  Overall: {'PASS' if result['passes_overall'] else 'FAIL'} "
-          f"(thresholds: median≤+20%, p99≤1.30x)")
+    b, n_, i_ = result["baked"], result["per_step_naive"], result["per_step_iobinding"]
+    print(f"  baked              median={b['median_ms']:.2f}ms  p99={b['p99_ms']:.2f}ms")
+    print(f"  per-step naive     median={n_['median_ms']:.2f}ms  p99={n_['p99_ms']:.2f}ms  "
+          f"({result['naive_gate']['median_overhead_pct'] * 100:+.1f}%, p99 {result['naive_gate']['p99_ratio']:.2f}x) "
+          f"{'PASS' if result['naive_gate']['passes_overall'] else 'FAIL'}")
+    print(f"  per-step IOBinding median={i_['median_ms']:.2f}ms  p99={i_['p99_ms']:.2f}ms  "
+          f"({result['iobinding_gate']['median_overhead_pct'] * 100:+.1f}%, p99 {result['iobinding_gate']['p99_ratio']:.2f}x) "
+          f"{'PASS' if result['iobinding_gate']['passes_overall'] else 'FAIL'}")
+    print(f"\n  Production-relevant gate (IOBinding): "
+          f"{'PASS' if result['passes_overall'] else 'FAIL'} (median≤+20%, p99≤1.30x)")
