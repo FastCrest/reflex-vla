@@ -498,17 +498,39 @@ class Pi05DecomposedInference:
         # Per-step path: drive the Euler loop in Python, calling the ONNX
         # once per step. Matches OpenPI's externalized loop pattern (see
         # research sidecar Lens 1).
+        #
+        # IOBinding is load-bearing here. The naive `sess.run(feed_dict)`
+        # path forces ORT to re-copy past_kvs (~140 MB across 38 tensors)
+        # host->device on every Euler iter — measured at +36.4% chunk
+        # overhead vs baked, failing gate 4. With IOBinding we pin past_kvs
+        # + prefix_pad_masks (and state if present) to device ONCE per chunk
+        # via OrtValue.ortvalue_from_numpy(arr, "cuda", 0); only x_t (~6 KB)
+        # and t (4 B) cross host->device per iter. Measured +13.3% chunk
+        # overhead, passes gate 4 (≤20% median, ≤1.30x p99). See
+        # 03_experiments/2026-04-30-per-step-overhead-modal-a100.md.
+        import onnxruntime as ort
         n = self._num_steps
         dt = -1.0 / n
         x_t = noise.astype(np.float32, copy=False)
         B = x_t.shape[0]
+        # Underlying ORT session (the cuda-graphs wrapper exposes .session).
+        raw_sess = getattr(self._sess_expert, "session", self._sess_expert)
+        binding = raw_sess.io_binding()
+        # Pin constant inputs to device. Hold OrtValues in a list so Python
+        # GC can't drop the device memory mid-loop (would segfault ORT).
+        device_kept_alive = []
+        for nm, arr in expert_feed_base.items():
+            ortval = ort.OrtValue.ortvalue_from_numpy(arr, "cuda", 0)
+            binding.bind_ortvalue_input(nm, ortval)
+            device_kept_alive.append(ortval)
         for step in range(n):
             time_val = 1.0 + step * dt
             t_tensor = np.full((B,), time_val, dtype=np.float32)
-            expert_feed = dict(expert_feed_base)
-            expert_feed["x_t"] = x_t
-            expert_feed["t"] = t_tensor
-            v_t = self._sess_expert.run(["v_t"], expert_feed)[0]
+            binding.bind_cpu_input("x_t", x_t)
+            binding.bind_cpu_input("t", t_tensor)
+            binding.bind_output("v_t", "cpu")
+            raw_sess.run_with_iobinding(binding)
+            v_t = binding.get_outputs()[0].numpy()
             if v_t.dtype != np.float32:
                 v_t = v_t.astype(np.float32)
             x_t = x_t + dt * v_t
