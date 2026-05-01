@@ -1378,12 +1378,37 @@ def create_app(
         assert_rtc_compatible_with_num_steps(_num_steps)
         try:
             from .rtc_adapter import RtcAdapter
-            # action_buffer comes from server.configure_replan() in lifespan
-            # but RtcAdapter doesn't actually use it for Day 1 (construction
-            # only). Pass a stub for now; Day 4 wiring resolves this.
+            # RTC's merge_and_update calls self.buffer.peek_all() to carry
+            # the previous chunk's unexecuted tail forward as inertia. If
+            # action_buffer wasn't initialized via --replan-hz/--execute-hz,
+            # auto-initialize with sensible defaults so RTC actually works.
+            # (Pre-fix this passed action_buffer=None silently, which made
+            # merge_and_update raise per-call → RTC was effectively no-op
+            # under --rtc without explicit replan flags. Caught 2026-04-30
+            # in gate-6 LIBERO smoke for per-step expert export.)
+            _buf = getattr(server, "_action_buffer", None)
+            if _buf is None and hasattr(server, "configure_replan"):
+                logger.info(
+                    "--rtc requires action_buffer; auto-configuring "
+                    "replan_hz=20 execute_hz=100 (pass --replan-hz / "
+                    "--execute-hz to override)"
+                )
+                try:
+                    server.configure_replan(replan_hz=20.0, execute_hz=100.0)
+                    _buf = getattr(server, "_action_buffer", None)
+                except Exception as e:
+                    logger.error(
+                        "Auto configure_replan failed; RTC requires action_buffer "
+                        "to function — disabling RTC for this run: %s", e,
+                    )
+                    server.rtc_adapter = None  # type: ignore[attr-defined]
+                    raise SystemExit(  # surface loudly instead of silent no-op
+                        f"--rtc requires action_buffer init; "
+                        f"configure_replan failed: {e}"
+                    )
             server.rtc_adapter = RtcAdapter(  # type: ignore[attr-defined]
                 policy=server,
-                action_buffer=getattr(server, "_action_buffer", None),
+                action_buffer=_buf,
                 config=rtc_config,
             )
             logger.info(
