@@ -1,0 +1,65 @@
+name: Discord status embed
+
+on:
+  schedule:
+    - cron: '0 16 * * *'  # 16:00 UTC daily (~9am SF)
+  workflow_dispatch:
+  release:
+    types: [published]
+
+jobs:
+  update-discord:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Fetch stats and update Discord embed
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          WEBHOOK_URL: ${{ secrets.DISCORD_STATUS_WEBHOOK }}
+          MSG_ID: ${{ vars.DISCORD_STATUS_MSG_ID }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          REPO_JSON=$(gh api "repos/$REPO")
+          STARS=$(echo "$REPO_JSON" | jq -r '.stargazers_count')
+          FORKS=$(echo "$REPO_JSON" | jq -r '.forks_count')
+          OPEN_ISSUES=$(echo "$REPO_JSON" | jq -r '.open_issues_count')
+          OPEN_PRS=$(gh pr list --repo "$REPO" --state open --json number | jq 'length')
+          LATEST_RELEASE=$(gh release view --repo "$REPO" --json tagName,publishedAt 2>/dev/null || echo '{"tagName":"none","publishedAt":""}')
+          TAG=$(echo "$LATEST_RELEASE" | jq -r '.tagName // "—"')
+          REL_DATE=$(echo "$LATEST_RELEASE" | jq -r '.publishedAt // ""' | cut -dT -f1)
+          LAST_COMMIT_DATE=$(echo "$REPO_JSON" | jq -r '.pushed_at' | cut -dT -f1)
+          PYPI=$(curl -fsSL "https://pypistats.org/api/packages/reflex-vla/recent" 2>/dev/null || echo '{"data":{"last_month":0}}')
+          PY30=$(echo "$PYPI" | jq -r '.data.last_month // 0')
+
+          PAYLOAD=$(jq -nc \
+            --arg ver "$TAG" --arg rel "$REL_DATE" --arg lc "$LAST_COMMIT_DATE" \
+            --argjson stars "$STARS" --argjson forks "$FORKS" \
+            --argjson issues "$OPEN_ISSUES" --argjson prs "$OPEN_PRS" \
+            --argjson py30 "$PY30" \
+            '{
+              embeds: [{
+                title: "Reflex Status",
+                description: "Live stats from GitHub + PyPI. Updates daily.",
+                color: 14821410,
+                fields: [
+                  {name:"Latest version",        value:$ver,                    inline:true},
+                  {name:"Released",              value:($rel // "—"),           inline:true},
+                  {name:"Last commit",           value:$lc,                     inline:true},
+                  {name:"⭐ Stars",              value:($stars|tostring),       inline:true},
+                  {name:"🍴 Forks",              value:($forks|tostring),       inline:true},
+                  {name:"📦 PyPI 30d",           value:($py30|tostring),        inline:true},
+                  {name:"Open PRs",              value:($prs|tostring),         inline:true},
+                  {name:"Open issues",           value:($issues|tostring),      inline:true},
+                  {name:"​",                value:"​",                inline:true}
+                ],
+                footer:{text:"github.com/FastCrest/reflex-vla • updated by GitHub Actions"},
+                timestamp: (now|todate)
+              }]
+            }')
+
+          curl -fsSL -X PATCH \
+            -H "Content-Type: application/json" \
+            -H "User-Agent: ReflexStatusUpdater/1.0" \
+            -d "$PAYLOAD" \
+            "$WEBHOOK_URL/messages/$MSG_ID" \
+            -w "\nHTTP %{http_code}\n"
