@@ -539,11 +539,26 @@ def _export_pi05_expert_pass(
     logger.info("[decomposed] expert torch.export: %.1fs", time.time() - t0)
 
     t0 = time.time()
+    # optimize=False disables torch.onnx.export's constant-folding pass for
+    # the expert graph. The default optimize=True folds the float64 sin/cos
+    # of `create_sinusoidal_pos_embedding(timestep, dim, ...)` in
+    # FP32-precision arithmetic, producing a `_to_copy` constant that
+    # differs from a true float64 compute by ~3e-5 max_abs. Without this
+    # fix, baked num_steps=10 carries that ~3e-5 time-emb drift through the
+    # entire expert stack and the per-step ONNX (which keeps Sin/Cos
+    # dynamic) cannot match it (cell 1 measured cos=0.998 / max_abs=0.24
+    # vs gate's cos≥0.99999 / max_abs≤1e-5). With optimize=False both
+    # baked and per-step compute time embedding via runtime Sin/Cos in
+    # float64, so the precision pathway is symmetric. Marginal node-count
+    # increase, immaterial runtime cost (sin/cos << gemm).
+    # Reproduced + isolated 2026-04-30; see
+    # 03_experiments/2026-04-30-per-step-parity-modal-a100.md.
     torch.onnx.export(
         ep_expert, tuple(expert_dummy.values()), str(expert_path),
         input_names=list(expert_dummy.keys()),
         output_names=output_names,
         opset_version=19,
+        optimize=False,
     )
     logger.info("[decomposed] expert ONNX conversion: %.1fs", time.time() - t0)
 
