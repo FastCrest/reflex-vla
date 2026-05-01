@@ -58,7 +58,7 @@ def _hf_secret():
 
 
 # Pin build_bust so the image cache from gate 3 stays warm.
-_BUST = "20260501-per-step-gates-curand-fix"
+_BUST = "20260501-per-step-gates-curand-eager-dlopen"
 
 hf_cache = modal.Volume.from_name("pi0-hf-cache", create_if_missing=True)
 onnx_output = modal.Volume.from_name("pi0-onnx-outputs", create_if_missing=True)

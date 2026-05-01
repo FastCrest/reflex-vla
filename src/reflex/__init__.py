@@ -50,6 +50,14 @@ def _candidate_lib_dirs():
             f"{base}/lib/{py_lib}/site-packages/nvidia/cuda_runtime/lib",
             f"{base}/lib/{py_lib}/site-packages/nvidia/cuda_nvrtc/lib",
             f"{base}/lib/{py_lib}/site-packages/nvidia/nccl/lib",
+            # ORT CUDA EP also needs curand/cufft/cusparse — added 2026-04-30
+            # after gate-4 per-step-overhead image (built without torch's
+            # transitive curand path) failed to load CUDA EP. Fix at source
+            # so all reflex consumers benefit, not just the export image.
+            f"{base}/lib/{py_lib}/site-packages/nvidia/curand/lib",
+            f"{base}/lib/{py_lib}/site-packages/nvidia/cufft/lib",
+            f"{base}/lib/{py_lib}/site-packages/nvidia/cusparse/lib",
+            f"{base}/lib/{py_lib}/site-packages/nvidia/nvjitlink/lib",
         ])
     return candidates
 
@@ -122,6 +130,15 @@ def _eager_dlopen_nvidia_libs() -> None:
     targets = [
         "libcudart.so.12", "libcublas.so.12", "libcublasLt.so.12",
         "libcudnn.so.9",
+        # ORT CUDA EP needs curand/cufft/cusparse for various kernels
+        # (sample, FFT-based ops, sparse attention). Caught 2026-04-30 when
+        # the gate-4 per-step-overhead image had nvidia-curand-cu12 pip-
+        # installed but lib unfindable by ORT's libonnxruntime_providers_cuda
+        # dlopen — without these here, ORT silently fell back to CPU EP.
+        "libcurand.so.10",
+        "libcufft.so.11",
+        "libcusparse.so.12",
+        "libnvJitLink.so.12",
         "libnvinfer.so.10",
         "libnvinfer_plugin.so.10",
         "libnvonnxparser.so.10",
