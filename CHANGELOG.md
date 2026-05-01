@@ -1,5 +1,50 @@
 # Changelog
 
+## v0.8.0 — 2026-05-02
+
+**Per-step expert ONNX export feature ships.** New `per_step_expert=True` flag on `export_pi05_decomposed` produces an `expert_denoise.onnx` that takes `(x_t, t, past_kv)` and returns `v_t` (single Euler step velocity), instead of the default baked-loop ONNX that takes `noise` and returns the fully-denoised action chunk. The per-step shape unblocks RTC + per-step caching (Dexmal 3-stage) by exposing the denoise loop in Python rather than baking it into the ONNX graph.
+
+This release closes gates 1-5 of the per-step ship sequence (per `features/03_export/per-step-expert-export.md`). Gate 6 LIBERO RTC regression closes as PARTIAL — see CAVEATS below.
+
+### Added
+
+- **`per_step_expert: bool = False` flag on `export_pi05_decomposed`.** When True, builds the expert ONNX as a single-Euler-step graph (input `x_t, t, past_kv`, output `v_t`) instead of the default baked-loop. The wrapper class `Pi05ExpertPerStepWrapper` handles dtype coercion, DynamicCache reconstruction, and SnapFlow / state_out variants.
+- **Runtime per-step Euler loop in `Pi05DecomposedInference._run_expert`.** When `reflex_config.json` has `decomposed.per_step_expert=true`, the runtime detects this at load and drives the Euler integration in Python: `for step in range(num_steps): v_t = sess.run(["v_t"], feed); x_t += dt * v_t`. Uses ORT IOBinding to pin past_kvs to device once per chunk (vs naive re-copy per iter — see v0.7.3 CHANGELOG entry for the IOBinding fix).
+- **Gate 1+2 unit tests:** `tests/test_decomposed_per_step_smoke.py` (11 wrapper-logic tests) + `tests/test_rtc_adapter_per_step.py` (6 config-time guard tests, rejects `--rtc` with `num_steps=1`).
+- **Gate 3+4+5 receipt-checker tests:** `tests/test_decomposed_per_step_parity.py` (cos≥0.99999 / max_abs≤1e-5 across pi05_teacher × num_steps={1, 10}), `tests/test_decomposed_per_step_overhead.py` (IOBinding ≤+20% median, ≤1.30x p99), `tests/test_decomposed_per_step_e2e_latency.py` (E2E pipeline overhead bounds + vlm phase symmetry check).
+- 32 per-step gate tests pass locally.
+
+### Validated
+
+- **Gate 3 parity (Modal A100-80GB)**: pi05_teacher × num_steps={1, 10} both produce **cos=1.0000000000, max_abs=0.000e+00** for baked-loop ONNX vs per-step ONNX driven 10×/1× in Python loop. Bit-exact.
+- **Gate 4 overhead (Modal A100-80GB)**: per-step expert ORT call overhead via IOBinding measured at **+13.3% median / +1.17x p99** vs baked single call. Naive (no IOBinding) was +36.4% / 1.46x — IOBinding is load-bearing for this gate.
+- **Gate 5 E2E latency (Modal A100-80GB)**: full `Pi05DecomposedInference.predict_action_chunk` pipeline measured at **+7.7% median / +1.08x p99** vs baked when `cudnn_conv_algo_search=HEURISTIC` is pinned (default ORT EXHAUSTIVE picks bimodal cuDNN algos that distort the comparison).
+
+### Caveats — `--rtc` integration with per-step is EXPERIMENTAL
+
+`--rtc` (Real-Time Chunking) on top of per-step expert ONNX is functional but produces **mixed results at N=20 LIBERO inject-latency-100**:
+
+| libero_10 task | baseline (baked, no RTC) | treatment (per-step + --rtc) | delta |
+|---|---|---|---|
+| 0 (alphabet soup + tomato sauce) | 18/19 (95%) | 15/19 (79%) | **-16pp** |
+| 1 (cream cheese + butter) | 17/20 (85%) | 16/20 (80%) | -5pp |
+| 2 (turn on stove + moka pot) | 14/19 (74%) | 10/17 (59%) | **-15pp** |
+| 3 (black bowl in cabinet drawer) | 11/20 (55%) | 9/18 (~50%) | ~0 |
+| 4 (book on shelf) | 14/20 (70%) | 15/20 (75%) | **+5pp** |
+| **aggregate** | **74/98 (75.5%)** | **65/94 (69.1%)** | **-6.4pp** |
+
+The regression is **localized to RTC's interaction with specific task structures** — per-step expert ONNX itself is bit-exact-equivalent to baked (gate 3 cos=1.0), so the success-rate difference cannot come from per-step. It comes from RTC's prefix-attention guidance influencing the policy output in ways that help on some tasks (task 4) but hurt on others (tasks 0+2).
+
+**Recommendation:** treat `--rtc` as opt-in, measure on YOUR task distribution before relying on it for production. The default `reflex serve` does not enable RTC. Customers who explicitly want RTC's smooth-chunk-transition behavior can pass `--rtc`, with the understanding that the success-rate tradeoff varies by task.
+
+Open follow-up investigation: ablation of WHY RTC helps task 4 but hurts tasks 0+2. Tracked in ADR follow-up note in `2026-04-24-defer-rtc-per-step-to-phase-1.md`.
+
+### Notes
+
+- Per-step expert export is OFF by default. Existing customers who use `reflex export` get the baked-loop ONNX they always got.
+- The new IOBinding runtime (in v0.7.3) only kicks in for per-step ONNX. Baked-loop runtime is unchanged.
+- Modal cost across the per-step ship gates: ~$28 (gates 3+4+5) + ~$94 (gate 6 with retries across multiple budget-capped Modal workspaces) = **~$122 total** vs $15-22 spec budget. Overrun captured 5 production-relevant bug fixes (shipped in v0.7.3) + one shipped feature (this release).
+
 ## v0.7.3 — 2026-04-30
 
 Five production-relevant fixes surfaced during per-step expert ONNX export validation work. Each was caught by a parity / latency gate, root-caused, fixed at source. None require user action; benefits show up automatically on `pip install reflex-vla --upgrade` + re-export of any decomposed pi0.5 ONNX.
