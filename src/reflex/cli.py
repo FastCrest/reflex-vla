@@ -57,7 +57,12 @@ def _looks_like_pi05_model_ref(model: str) -> bool:
 
 def _version_callback(value: bool) -> None:
     if value:
-        typer.echo(f"reflex {__version__}")
+        typer.echo(
+            f"reflex {__version__}\n"
+            f"Reflex VLA — Copyright (c) 2026 FastCrest. "
+            f"Source-available under BSL 1.1 (auto-converts to Apache 2.0 on 2030-04-28).\n"
+            f"https://github.com/FastCrest/reflex-vla"
+        )
         raise typer.Exit()
 
 

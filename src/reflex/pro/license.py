@@ -270,6 +270,23 @@ def load_license(
         "Pro license valid — customer_id=%s tier=%s expires_at=%s",
         license.customer_id, license.tier, license.expires_at,
     )
+
+    # Best-effort telemetry heartbeat (opt-out via REFLEX_NO_TELEMETRY=1).
+    # Phase 1: minimal payload (customer_id + version); workload_type
+    # ("vla_family", "hardware_tier") defaults to "unknown" because
+    # license.py doesn't know what's being served. The runtime caller
+    # can re-emit a richer heartbeat post-server-startup if desired.
+    # Telemetry failure never blocks startup — see pro/telemetry.py.
+    try:
+        from reflex import __version__
+        from reflex.pro.telemetry import emit as _emit_telemetry
+        _emit_telemetry(
+            customer_id=refreshed.customer_id,
+            reflex_version=__version__,
+        )
+    except Exception:  # noqa: BLE001 — telemetry must never break licensing
+        pass
+
     return refreshed
 
 

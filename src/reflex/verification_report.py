@@ -95,6 +95,7 @@ def _format_parity(parity: dict[str, Any] | None) -> str:
 def write_verification_report(
     export_dir: str | Path,
     parity: dict[str, Any] | None = None,
+    pro_customer_id: str | None = None,
 ) -> Path:
     """Write or overwrite ``<export_dir>/VERIFICATION.md``.
 
@@ -106,6 +107,11 @@ def write_verification_report(
         The result dict from `ValidateRoundTrip.run()`. If None, the parity
         section will say "not yet verified". Pass the full dict from the
         validate CLI to fill in the numbers.
+    pro_customer_id : str or None
+        If provided (Pro license active), embeds an HMAC fingerprint of
+        the report content as a trailing markdown comment. Used for
+        commercial-redistribution traceability. Free-tier callers
+        (``pro_customer_id=None``) get an unfingerprinted report.
 
     Returns
     -------
@@ -176,8 +182,25 @@ def write_verification_report(
         "Re-run either command to refresh this file._"
     )
 
+    body = "\n".join(lines) + "\n"
+
+    # Pro-only fingerprint: HMAC over the canonical body, embedded as a
+    # trailing HTML-style markdown comment so it survives copy-paste but
+    # doesn't render in viewers. Free-tier reports omit this entirely.
+    if pro_customer_id:
+        try:
+            from reflex.pro.fingerprint import compute_fingerprint
+            fp = compute_fingerprint(body.encode("utf-8"), pro_customer_id)
+            body += (
+                "\n<!-- reflex_fingerprint: "
+                + json.dumps(fp.to_dict(), separators=(",", ":"), sort_keys=True)
+                + " -->\n"
+            )
+        except Exception:  # noqa: BLE001 — never block export on fingerprint failure
+            pass
+
     out = export_dir / REPORT_FILENAME
-    out.write_text("\n".join(lines) + "\n")
+    out.write_text(body)
     return out
 
 

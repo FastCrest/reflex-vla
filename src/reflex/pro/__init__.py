@@ -82,6 +82,16 @@ from reflex.pro.license import (
     issue_dev_license,
     load_license,
 )
+from reflex.pro.fingerprint import (
+    Fingerprint,
+    compute_fingerprint,
+    verify_fingerprint,
+)
+from reflex.pro.telemetry import (
+    HeartbeatPayload,
+    build_payload as build_telemetry_payload,
+    emit as emit_telemetry,
+)
 
 __all__ = [
     "ConsentMismatch",
@@ -93,9 +103,11 @@ __all__ = [
     "EvalGate",
     "EvalReport",
     "EvalSample",
+    "Fingerprint",
     "GateResult",
     "GateThresholds",
     "HardwareFingerprintLite",
+    "HeartbeatPayload",
     "HfHubAuthFailure",
     "HfHubClient",
     "HfHubDown",
@@ -127,10 +139,14 @@ __all__ = [
     "TaskDelta",
     "TripDecision",
     "WeeklyReport",
+    "build_telemetry_payload",
+    "compute_fingerprint",
+    "emit_telemetry",
     "issue_dev_license",
     "load_license",
     "render_cli",
     "render_json",
     "send_email",
     "send_slack",
+    "verify_fingerprint",
 ]

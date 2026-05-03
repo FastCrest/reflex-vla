@@ -1,0 +1,12 @@
+name = "reflex-telemetry"
+main = "worker.js"
+compatibility_date = "2026-05-01"
+
+# Fill in `database_id` after `wrangler d1 create reflex-telemetry`.
+[[d1_databases]]
+binding = "DB"
+database_name = "reflex-telemetry"
+database_id = "REPLACE_WITH_DATABASE_ID_FROM_WRANGLER_D1_CREATE"
+
+# Optional: bind a custom domain after first deploy.
+# routes = [{ pattern = "telemetry.fastcrest.com/*", custom_domain = true }]

@@ -150,6 +150,7 @@ class RecordWriter:
         notes: str = "",
         reflex_version: str = "",
         policies: list[dict[str, Any]] | None = None,
+        pro_customer_id: str | None = None,
     ) -> None:
         self.record_dir = Path(record_dir)
         self.record_dir.mkdir(parents=True, exist_ok=True)
@@ -196,6 +197,23 @@ class RecordWriter:
         # 2026-04-25-policy-versioning-architecture).
         if policies:
             self._header_meta["policies"] = list(policies)
+
+        # Pro-only fingerprint tag in the header. Identifies the source
+        # customer (anonymized) of recorded traces so commercial
+        # redistribution can be traced. Free-tier (pro_customer_id=None)
+        # records omit this entirely. v1 readers ignore unknown fields.
+        if pro_customer_id:
+            try:
+                from reflex.pro.fingerprint import compute_fingerprint
+                # Sign over the canonicalized header meta so the fingerprint
+                # ties to this session's identity (not per-request).
+                canonical = json.dumps(
+                    self._header_meta, sort_keys=True, separators=(",", ":")
+                ).encode("utf-8")
+                fp = compute_fingerprint(canonical, pro_customer_id)
+                self._header_meta["reflex_fingerprint"] = fp.to_dict()
+            except Exception:  # noqa: BLE001 — never block record on fingerprint failure
+                pass
         self.image_redaction: ImageRedaction = image_redaction
         self.instruction_redaction = instruction_redaction
         self.sample_rate = sample_rate
