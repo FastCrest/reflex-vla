@@ -44,6 +44,11 @@ dependencies = [
     # starlette/anyio stack. Adding here so `from reflex import ReflexClient`
     # works on a bare `pip install reflex-vla`.
     "httpx>=0.24.0",
+    # Ed25519 license signature verification for Pro tier (`reflex pro
+    # activate <code>` and the daily heartbeat path). Small (~5MB) + already
+    # transitively pulled by huggingface_hub on most installs. Required at
+    # base level so `reflex pro` commands work on bare `pip install reflex-vla`.
+    "cryptography>=42.0",
 ]
 
 [project.optional-dependencies]

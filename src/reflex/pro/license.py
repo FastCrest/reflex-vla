@@ -33,9 +33,14 @@ from typing import Any, ClassVar
 logger = logging.getLogger(__name__)
 
 
-# Bumped on a breaking license-format change. Phase 1 = v1; old licenses
-# get a clear "please re-issue" error. Phase 2 evolution is additive-only.
-LICENSE_VERSION = 1
+# Bumped on a breaking license-format change.
+#   v1 = unsigned dev license (Phase 1, accepted with warning when bundled
+#        public key not yet deployed; will be rejected once Phase 1.5 lands)
+#   v2 = Ed25519-signed via the license worker (Phase 1.5, required for paid)
+# load_license() accepts both versions; v1 falls through with a deprecation
+# warning, v2 must verify against the bundled public key.
+LICENSE_VERSION = 2
+LICENSE_VERSION_LEGACY_UNSIGNED = 1
 
 # Default location. Customer can override via `--pro-license <path>`
 # (Phase 1.5 wiring) OR `REFLEX_PRO_LICENSE` env var.
@@ -204,10 +209,32 @@ def load_license(
             f"Pro license at {path_obj} is corrupt or schema-mismatched: {exc}"
         ) from exc
 
-    if license.license_version != LICENSE_VERSION:
+    if license.license_version not in (LICENSE_VERSION, LICENSE_VERSION_LEGACY_UNSIGNED):
         raise LicenseCorrupt(
             f"Pro license version {license.license_version} not supported "
-            f"(expected {LICENSE_VERSION}). Re-issue at the Pro dashboard."
+            f"(expected {LICENSE_VERSION} signed, or {LICENSE_VERSION_LEGACY_UNSIGNED} "
+            f"legacy unsigned). Re-issue with the latest license worker."
+        )
+
+    # Phase 1.5: verify Ed25519 signature for v2 licenses. Legacy v1 licenses
+    # fall through with a deprecation warning so existing dev installs don't
+    # break overnight; future release will reject them entirely.
+    if license.license_version == LICENSE_VERSION:
+        try:
+            from reflex.pro.signature import verify_license_signature
+            verify_license_signature(data)
+        except Exception as exc:  # noqa: BLE001 — wrap in LicenseCorrupt below
+            raise LicenseCorrupt(
+                f"Pro license signature verification failed: {exc}. "
+                f"Either the license file was tampered with, or the bundled "
+                f"public key in src/reflex/pro/_public_key.py is stale "
+                f"(re-fetch via `wrangler tail` on the deployed license worker)."
+            ) from exc
+    else:
+        logger.warning(
+            "Pro license is v%d (legacy unsigned). Re-issue as v%d via the "
+            "deployed license worker before this format is removed.",
+            LICENSE_VERSION_LEGACY_UNSIGNED, LICENSE_VERSION,
         )
 
     if license.is_expired():

@@ -92,6 +92,23 @@ from reflex.pro.telemetry import (
     build_payload as build_telemetry_payload,
     emit as emit_telemetry,
 )
+from reflex.pro.signature import (
+    LicenseSignatureError,
+    verify_license_signature,
+)
+from reflex.pro.activate import (
+    ActivationCodeError,
+    ActivationError,
+    ActivationNetworkError,
+    activate_license,
+    heartbeat_fingerprint,
+    probe_hardware_binding,
+)
+from reflex.pro.heartbeat import (
+    LicenseExpiredAtServer,
+    LicenseRevokedError,
+    send_heartbeat,
+)
 
 __all__ = [
     "ConsentMismatch",
@@ -139,14 +156,25 @@ __all__ = [
     "TaskDelta",
     "TripDecision",
     "WeeklyReport",
+    "ActivationCodeError",
+    "ActivationError",
+    "ActivationNetworkError",
+    "LicenseExpiredAtServer",
+    "LicenseRevokedError",
+    "LicenseSignatureError",
+    "activate_license",
     "build_telemetry_payload",
     "compute_fingerprint",
     "emit_telemetry",
+    "heartbeat_fingerprint",
     "issue_dev_license",
     "load_license",
+    "probe_hardware_binding",
     "render_cli",
     "render_json",
     "send_email",
+    "send_heartbeat",
     "send_slack",
     "verify_fingerprint",
+    "verify_license_signature",
 ]
