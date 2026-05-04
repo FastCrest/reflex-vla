@@ -509,6 +509,38 @@ def inc_a2c2_skipped(reason: str) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Episode cache memory tracking
+#
+# Note on naming: by Prometheus convention `_total` is reserved for monotonic
+# Counters. `reflex_episode_cache_bytes_total` is implemented here as a Gauge
+# because the resident byte size goes up on insert AND down on eviction/reset.
+# Name preserved verbatim from the GFI spec; flagged for maintainer review.
+#
+# Cardinality: bounded enums on (embodiment, model_id, policy_slot) — same
+# label set as reflex_act_latency_seconds. ~3 × 6 × 3 = 54 series.
+# ---------------------------------------------------------------------------
+
+reflex_episode_cache_bytes_total = Gauge(
+    "reflex_episode_cache_bytes_total",
+    "Resident byte size of the EpisodeCache (sum of past_kv + prefix_pad_masks "
+    "across all retained entries)",
+    labelnames=("embodiment", "model_id", "policy_slot"),
+    registry=REGISTRY,
+)
+
+
+def set_episode_cache_bytes(
+    value: int,
+    embodiment: str,
+    model_id: str,
+    policy_slot: str = "prod",
+) -> None:
+    reflex_episode_cache_bytes_total.labels(
+        embodiment=embodiment, model_id=model_id, policy_slot=policy_slot,
+    ).set(value)
+
+
+# ---------------------------------------------------------------------------
 # Render
 # ---------------------------------------------------------------------------
 
