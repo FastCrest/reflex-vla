@@ -74,6 +74,15 @@ def main(
         callback=_version_callback, is_eager=True,
     ),
 ):
+    # First-run onboarding prompt — fires once, before any command.
+    # Shows telemetry (opt-out) and data contribution (opt-in) choices.
+    # Skips in non-interactive contexts (CI, pipes). Ctrl+C safe.
+    try:
+        from reflex.onboarding import maybe_onboard
+        maybe_onboard()
+    except Exception:  # noqa: BLE001
+        pass  # never block the CLI on onboarding issues
+
     # Once-per-day PyPI check for a newer reflex-vla; silent if up-to-date.
     # Honors REFLEX_NO_UPGRADE_CHECK=1; skipped on dev installs.
     try:
@@ -3877,7 +3886,123 @@ def config_show() -> None:
     table.add_row("hf_cache", _os.environ.get("HF_HOME", str(_Path.home() / ".cache" / "huggingface")))
     table.add_row("FASTCREST_PROXY_URL", _os.environ.get("FASTCREST_PROXY_URL", "(default: https://chat.fastcrest.com)"))
     table.add_row("OPENAI_API_KEY", "set" if _os.environ.get("OPENAI_API_KEY") else "(unset — chat uses hosted proxy)")
+    # Telemetry and data contribution status
+    try:
+        from reflex.onboarding import get_onboarding_state
+        state = get_onboarding_state()
+        table.add_row("telemetry", "on" if state.telemetry_enabled else "off")
+        table.add_row("contribute_data", "on" if state.contribute_data else "off")
+        table.add_row("dont_ask_again", "yes" if state.dont_ask_again else "no")
+    except Exception:
+        table.add_row("telemetry", "(unknown)")
+        table.add_row("contribute_data", "(unknown)")
     console.print(table)
+
+
+@config_app.command("set")
+def config_set(
+    key: str = typer.Argument(help="Config key: telemetry, contribute-data"),
+    value: str = typer.Argument(help="Value: on, off"),
+) -> None:
+    """Set a configuration value (telemetry on/off, contribute-data on/off)."""
+    from reflex.onboarding import set_telemetry_enabled, set_contribute_data
+
+    key_lower = key.lower().replace("_", "-")
+    value_lower = value.lower()
+
+    if value_lower not in ("on", "off", "true", "false", "1", "0"):
+        console.print(f"Invalid value: {value}. Use on/off.", style="red")
+        raise typer.Exit(1)
+    enabled = value_lower in ("on", "true", "1")
+
+    if key_lower == "telemetry":
+        state = set_telemetry_enabled(enabled)
+        console.print(f"Telemetry set to: {'on' if state.telemetry_enabled else 'off'}")
+    elif key_lower == "contribute-data":
+        state = set_contribute_data(enabled)
+        console.print(f"Data contribution set to: {'on' if state.contribute_data else 'off'}")
+    else:
+        console.print(
+            f"Unknown config key: {key}. Valid keys: telemetry, contribute-data",
+            style="red",
+        )
+        raise typer.Exit(1)
+
+
+# ── Data subcommands ──────────────────────────────────────────────────
+
+data_app = typer.Typer(name="data", help="Manage episode data uploads and contributions.", no_args_is_help=True)
+app.add_typer(data_app, name="data")
+
+
+@data_app.command("review")
+def data_review(
+    pending: bool = typer.Option(False, "--pending", help="Show only pending uploads"),
+) -> None:
+    """Review queued and completed episode data uploads."""
+    from reflex.pro.upload import UploadClient
+
+    client = UploadClient()
+    if pending:
+        manifests = client.pending_manifests()
+        if not manifests:
+            console.print("No pending uploads.")
+            return
+        table = Table(title="Pending Uploads")
+        table.add_column("Episode ID")
+        table.add_column("Size")
+        table.add_column("Queued At")
+        table.add_column("Attempts")
+        for m in manifests:
+            table.add_row(m.episode_id, str(m.file_size), m.queued_at, str(m.attempts))
+        console.print(table)
+    else:
+        pending_m = client.pending_manifests()
+        completed_m = client.completed_manifests()
+        console.print(f"Pending: {len(pending_m)}, Completed: {len(completed_m)}")
+        if pending_m:
+            table = Table(title="Pending")
+            table.add_column("Episode ID")
+            table.add_column("Size")
+            table.add_column("Queued At")
+            for m in pending_m:
+                table.add_row(m.episode_id, str(m.file_size), m.queued_at)
+            console.print(table)
+        if completed_m:
+            table = Table(title="Completed")
+            table.add_column("Episode ID")
+            table.add_column("Size")
+            table.add_column("Completed At")
+            for m in completed_m:
+                table.add_row(m.episode_id, str(m.file_size), m.completed_at or "?")
+            console.print(table)
+
+
+@data_app.command("stats")
+def data_stats() -> None:
+    """Show episode data upload statistics."""
+    from reflex.pro.upload import UploadClient
+
+    client = UploadClient()
+    s = client.stats()
+    table = Table(title="Upload Stats")
+    table.add_column("Key")
+    table.add_column("Value")
+    for k, v in s.items():
+        table.add_row(str(k), str(v))
+    console.print(table)
+
+
+@data_app.command("revoke")
+def data_revoke() -> None:
+    """Delete ALL queued and completed episode data. GDPR/CCPA compliance."""
+    from reflex.onboarding import set_contribute_data
+    from reflex.pro.upload import UploadClient
+
+    client = UploadClient()
+    removed = client.revoke_all()
+    set_contribute_data(False)
+    console.print(f"Revoked: {removed} files deleted. Data contribution disabled.")
 
 
 if __name__ == "__main__":

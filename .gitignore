@@ -39,3 +39,4 @@ reflex_context/
 # Stray cruft from prior accidents — preempt staging them
 =*
 LICENSE.bak*
+*.pyc

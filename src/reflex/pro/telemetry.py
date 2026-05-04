@@ -1,23 +1,25 @@
-"""Pro-tier telemetry heartbeat — opt-out, license-bound, anonymized.
+"""Telemetry heartbeat — opt-out, anonymized. Pro and free tiers.
 
 Sends a small JSON heartbeat to the FastCrest telemetry endpoint once per
-24h while a Pro license is loaded and active. The aggregate data lets us
-estimate the gap between active Pro deployments and paying licenses
-(bypass-population detection at scale, per the OSS leak monitoring
-runbook in reflex_context/04_product/oss_leak_monitoring.md).
+24h. Pro-tier heartbeats include the license customer_id. Free-tier
+heartbeats use license_id="free" and org_hash=SHA256(machine_fingerprint)[:16].
 
 Privacy posture (locked Phase 1)
 --------------------------------
-What gets sent (5 fields total):
+What gets sent:
 
-- ``license_id``   — the JWT ``customer_id`` field. Lets us match against
-                     the paying-customer DB.
-- ``org_hash``     — ``SHA256(customer_id)[:16]``. Anonymized identity for
-                     unique-deployment counting without identification.
-- ``workload``     — ``{vla_family, hardware_tier}``. Aggregated stats only
-                     (e.g., "20% of Pro deployments serve pi0.5 on A100").
-- ``reflex_version`` — ``__version__``. Lets us see version-distribution.
+- ``license_id``   — the JWT ``customer_id`` field (Pro), or "free" (free tier).
+- ``org_hash``     — ``SHA256(customer_id)[:16]`` (Pro) or
+                     ``SHA256(machine_fingerprint)[:16]`` (free).
+- ``workload``     — ``{vla_family, hardware_tier}``. Aggregated stats only.
+- ``reflex_version`` — ``__version__``. Version-distribution tracking.
 - ``timestamp``    — ISO-8601 UTC. Recency / heartbeat staleness only.
+- ``tier``         — "pro" or "free". Distinguishes license tiers.
+
+Free-tier additional fields (all optional, aggregated stats only):
+- ``model_name``, ``hardware_detail``, ``latency_p50/p95/p99``,
+  ``error_count_24h``, ``safety_violation_count_24h``, ``episode_count_24h``,
+  ``action_dim``, ``embodiment``, ``denoise_steps``, ``inference_mode``
 
 What does NOT get sent:
 
@@ -30,16 +32,15 @@ What does NOT get sent:
 
 Opt-out
 -------
-Default behavior on a Pro license: telemetry ON.
+Default behavior: telemetry ON for both Pro and free tiers.
 
-Customers can disable via:
+Users can disable via:
 
-- ``REFLEX_NO_TELEMETRY=1`` environment variable (one-shot)
+- ``REFLEX_NO_TELEMETRY=1`` environment variable
 - ``--no-telemetry`` CLI flag (Phase 1.5 wiring)
-- License-level opt-out (Phase 2 — per-customer flag in the JWT)
-
-Free-tier deployments (no Pro license) NEVER call telemetry. The
-emit() function is a no-op without a valid license.
+- ``reflex config set telemetry off``
+- Onboarding prompt (free tier)
+- License-level opt-out (Phase 2, Pro only)
 
 Endpoint
 --------
@@ -51,7 +52,7 @@ deployments.
 Failure mode
 ------------
 Network unreachable / endpoint down → fail silently. Never blocks the
-license heartbeat path. Telemetry failure logs at DEBUG level only.
+CLI or license heartbeat path. Telemetry failure logs at DEBUG level only.
 """
 from __future__ import annotations
 
@@ -59,8 +60,10 @@ import hashlib
 import json
 import logging
 import os
+import time
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 
 logger = logging.getLogger(__name__)
@@ -192,10 +195,278 @@ def emit(
         return False
 
 
+# ── Free-tier telemetry ────────────────────────────────────────────────
+#
+# Fires for ALL users (no Pro license required) if telemetry is enabled.
+# Uses the same endpoint but with license_id="free" and org_hash derived
+# from a machine fingerprint instead of a customer_id.
+#
+# Once-per-24h cache at ~/.reflex/.free_telemetry_cache to avoid
+# hitting the endpoint on every CLI invocation.
+
+
+_FREE_TELEMETRY_CACHE_TTL = 24 * 60 * 60  # 24 hours
+
+
+@dataclass(frozen=True)
+class FreeHeartbeatPayload:
+    """Extended heartbeat payload for free-tier telemetry.
+
+    Includes all base fields plus deployment stats that help improve
+    Reflex VLA. No images, no trajectories, no PII.
+    """
+
+    schema_version: int
+    license_id: str  # always "free"
+    org_hash: str  # SHA256(machine_fingerprint)[:16]
+    workload: dict[str, str]
+    reflex_version: str
+    timestamp: str
+    tier: str  # "free"
+    model_name: str
+    hardware_detail: str
+    latency_p50: float | None
+    latency_p95: float | None
+    latency_p99: float | None
+    error_count_24h: int
+    safety_violation_count_24h: int
+    episode_count_24h: int
+    action_dim: int | None
+    embodiment: str
+    denoise_steps: int | None
+    inference_mode: str
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+def _machine_fingerprint() -> str:
+    """Deterministic machine fingerprint for free-tier org_hash.
+
+    Uses platform info (hostname, machine, processor) hashed together.
+    No PII: the hash is one-way and truncated.
+    """
+    import platform
+    import uuid
+
+    parts = [
+        platform.node(),
+        platform.machine(),
+        platform.processor(),
+        platform.system(),
+    ]
+    # Also try MAC address for stability across reboots
+    try:
+        parts.append(str(uuid.getnode()))
+    except Exception:
+        pass
+    raw = "|".join(parts)
+    return raw
+
+
+def _free_org_hash() -> str:
+    """SHA256[:16] of machine fingerprint. Anonymized counting tag."""
+    return hashlib.sha256(_machine_fingerprint().encode("utf-8")).hexdigest()[:16]
+
+
+def _free_cache_path() -> Path:
+    """Path to the free-tier telemetry cache file."""
+    home = Path(os.environ.get("REFLEX_HOME", Path.home() / ".reflex"))
+    home.mkdir(parents=True, exist_ok=True)
+    return home / ".free_telemetry_cache"
+
+
+def _free_cache_valid() -> bool:
+    """True if the free-tier cache is fresh (less than 24h old)."""
+    cache = _free_cache_path()
+    if not cache.exists():
+        return False
+    try:
+        data = json.loads(cache.read_text())
+        return (time.time() - data.get("checked_at", 0)) < _FREE_TELEMETRY_CACHE_TTL
+    except (OSError, json.JSONDecodeError, ValueError):
+        return False
+
+
+def _write_free_cache() -> None:
+    """Write a fresh free-tier telemetry cache timestamp."""
+    try:
+        _free_cache_path().write_text(json.dumps({"checked_at": time.time()}))
+    except OSError:
+        pass
+
+
+def _is_telemetry_enabled_by_onboarding() -> bool:
+    """Check onboarding.json for telemetry opt-out. Returns True if enabled or missing."""
+    try:
+        onboarding_path = Path("~/.reflex/onboarding.json").expanduser()
+        if not onboarding_path.exists():
+            return True  # default: telemetry on
+        data = json.loads(onboarding_path.read_text())
+        return bool(data.get("telemetry_enabled", True))
+    except Exception:
+        return True  # fail-open: telemetry on if we can't read state
+
+
+def build_free_payload(
+    *,
+    reflex_version: str = "unknown",
+    model_name: str = "unknown",
+    hardware_detail: str = "unknown",
+    vla_family: str = "unknown",
+    hardware_tier: str = "unknown",
+    latency_p50: float | None = None,
+    latency_p95: float | None = None,
+    latency_p99: float | None = None,
+    error_count_24h: int = 0,
+    safety_violation_count_24h: int = 0,
+    episode_count_24h: int = 0,
+    action_dim: int | None = None,
+    embodiment: str = "unknown",
+    denoise_steps: int | None = None,
+    inference_mode: str = "unknown",
+) -> FreeHeartbeatPayload:
+    """Build (but don't send) a free-tier heartbeat payload.
+
+    Separated from emit_free() so tests can inspect the payload without
+    triggering an HTTP call.
+    """
+    return FreeHeartbeatPayload(
+        schema_version=HEARTBEAT_SCHEMA_VERSION,
+        license_id="free",
+        org_hash=_free_org_hash(),
+        workload={"vla_family": vla_family, "hardware_tier": hardware_tier},
+        reflex_version=reflex_version,
+        timestamp=_utc_now_iso(),
+        tier="free",
+        model_name=model_name,
+        hardware_detail=hardware_detail,
+        latency_p50=latency_p50,
+        latency_p95=latency_p95,
+        latency_p99=latency_p99,
+        error_count_24h=error_count_24h,
+        safety_violation_count_24h=safety_violation_count_24h,
+        episode_count_24h=episode_count_24h,
+        action_dim=action_dim,
+        embodiment=embodiment,
+        denoise_steps=denoise_steps,
+        inference_mode=inference_mode,
+    )
+
+
+def emit_free(
+    *,
+    reflex_version: str = "unknown",
+    model_name: str = "unknown",
+    hardware_detail: str = "unknown",
+    vla_family: str = "unknown",
+    hardware_tier: str = "unknown",
+    latency_p50: float | None = None,
+    latency_p95: float | None = None,
+    latency_p99: float | None = None,
+    error_count_24h: int = 0,
+    safety_violation_count_24h: int = 0,
+    episode_count_24h: int = 0,
+    action_dim: int | None = None,
+    embodiment: str = "unknown",
+    denoise_steps: int | None = None,
+    inference_mode: str = "unknown",
+    endpoint: str | None = None,
+) -> bool:
+    """Send a free-tier heartbeat to the telemetry endpoint.
+
+    Returns True if the heartbeat was POSTed and the endpoint returned 2xx,
+    False on opt-out / network failure / non-2xx / cache-fresh. Never raises.
+
+    Does NOT require a Pro license. Fires for ALL users if telemetry enabled.
+    Once-per-24h via cache file.
+    """
+    if _is_disabled():
+        logger.debug("Free telemetry disabled via REFLEX_NO_TELEMETRY env; skipping.")
+        return False
+
+    if not _is_telemetry_enabled_by_onboarding():
+        logger.debug("Free telemetry disabled via onboarding; skipping.")
+        return False
+
+    if _free_cache_valid():
+        logger.debug("Free telemetry cache fresh; skipping.")
+        return False
+
+    payload = build_free_payload(
+        reflex_version=reflex_version,
+        model_name=model_name,
+        hardware_detail=hardware_detail,
+        vla_family=vla_family,
+        hardware_tier=hardware_tier,
+        latency_p50=latency_p50,
+        latency_p95=latency_p95,
+        latency_p99=latency_p99,
+        error_count_24h=error_count_24h,
+        safety_violation_count_24h=safety_violation_count_24h,
+        episode_count_24h=episode_count_24h,
+        action_dim=action_dim,
+        embodiment=embodiment,
+        denoise_steps=denoise_steps,
+        inference_mode=inference_mode,
+    )
+    url = endpoint or os.environ.get("REFLEX_TELEMETRY_ENDPOINT", DEFAULT_TELEMETRY_ENDPOINT)
+
+    try:
+        import httpx
+    except ImportError:
+        # Fall back to stdlib urllib
+        try:
+            import urllib.request
+            import urllib.error
+
+            data = json.dumps(payload.to_dict()).encode("utf-8")
+            req = urllib.request.Request(
+                url,
+                data=data,
+                headers={
+                    "Content-Type": "application/json",
+                    "User-Agent": f"reflex-vla/{reflex_version}",
+                },
+                method="POST",
+            )
+            resp = urllib.request.urlopen(req, timeout=_REQUEST_TIMEOUT_S)
+            if 200 <= resp.status < 300:
+                _write_free_cache()
+                logger.debug("Free telemetry heartbeat posted (urllib): %s", payload.org_hash)
+                return True
+            return False
+        except Exception as exc:
+            logger.debug("Free telemetry POST failed (urllib): %s", exc)
+            return False
+
+    try:
+        resp = httpx.post(
+            url,
+            json=payload.to_dict(),
+            timeout=_REQUEST_TIMEOUT_S,
+            headers={"User-Agent": f"reflex-vla/{reflex_version}"},
+        )
+        if 200 <= resp.status_code < 300:
+            _write_free_cache()
+            logger.debug("Free telemetry heartbeat posted: %s", payload.org_hash)
+            return True
+        logger.debug(
+            "Free telemetry endpoint returned %d for %s", resp.status_code, payload.org_hash
+        )
+        return False
+    except Exception as exc:  # noqa: BLE001 — telemetry is best-effort
+        logger.debug("Free telemetry POST failed: %s", exc)
+        return False
+
+
 __all__ = [
     "DEFAULT_TELEMETRY_ENDPOINT",
     "HEARTBEAT_SCHEMA_VERSION",
+    "FreeHeartbeatPayload",
     "HeartbeatPayload",
+    "build_free_payload",
     "build_payload",
     "emit",
+    "emit_free",
 ]

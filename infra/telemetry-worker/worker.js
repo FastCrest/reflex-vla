@@ -1,9 +1,10 @@
 /**
- * Reflex Pro telemetry endpoint — Cloudflare Worker.
+ * Reflex telemetry endpoint — Cloudflare Worker.
  *
  * Receives heartbeat POSTs from `pip install reflex-vla` deployments
- * running with a valid Pro license. Validates the payload shape, writes
- * one row per heartbeat to D1, and returns 204 No Content.
+ * running with a valid Pro license OR free-tier telemetry enabled.
+ * Validates the payload shape, writes one row per heartbeat to D1,
+ * and returns 204 No Content.
  *
  * Deploy:
  *   cd infra/telemetry-worker
@@ -12,6 +13,7 @@
  *   wrangler d1 create reflex-telemetry
  *   # Copy the resulting database_id into wrangler.toml
  *   wrangler d1 execute reflex-telemetry --file=schema.sql
+ *   wrangler d1 execute reflex-telemetry --file=migrations/001_free_tier_fields.sql
  *   wrangler deploy
  *   # Optional: bind a custom domain at telemetry.fastcrest.workers.dev
  *
@@ -20,8 +22,9 @@
  *   never write it to D1. The IP is dropped after request handling.
  * - We never log /act payloads, customer data, or model weights — the
  *   Reflex client side intentionally omits these from the heartbeat.
- * - The org_hash field is SHA256(customer_id)[:16]. Reverse-mapping
- *   requires the billing DB.
+ * - The org_hash field is SHA256(customer_id)[:16] (Pro) or
+ *   SHA256(machine_fingerprint)[:16] (free). Reverse-mapping
+ *   requires the billing DB (Pro) or physical machine access (free).
  */
 
 const SCHEMA_VERSION_ACCEPTED = 1;
@@ -93,12 +96,29 @@ export default {
     const vlaFamily = String(payload.workload.vla_family || "unknown").slice(0, 64);
     const hardwareTier = String(payload.workload.hardware_tier || "unknown").slice(0, 64);
 
+    // Determine tier: free-tier uses license_id="free"
+    const tier = payload.license_id === "free" ? "free" : (payload.tier || "pro");
+
+    // Extract optional free-tier fields (safe defaults)
+    const modelName = String(payload.model_name || "unknown").slice(0, 128);
+    const hardwareDetail = String(payload.hardware_detail || "unknown").slice(0, 128);
+    const latencyP50 = typeof payload.latency_p50 === "number" ? payload.latency_p50 : null;
+    const latencyP95 = typeof payload.latency_p95 === "number" ? payload.latency_p95 : null;
+    const latencyP99 = typeof payload.latency_p99 === "number" ? payload.latency_p99 : null;
+    const errorCount24h = typeof payload.error_count_24h === "number" ? payload.error_count_24h : 0;
+    const safetyViolationCount24h = typeof payload.safety_violation_count_24h === "number" ? payload.safety_violation_count_24h : 0;
+    const episodeCount24h = typeof payload.episode_count_24h === "number" ? payload.episode_count_24h : 0;
+    const actionDim = typeof payload.action_dim === "number" ? payload.action_dim : null;
+    const embodiment = String(payload.embodiment || "unknown").slice(0, 64);
+    const denoiseSteps = typeof payload.denoise_steps === "number" ? payload.denoise_steps : null;
+    const inferenceMode = String(payload.inference_mode || "unknown").slice(0, 64);
+
     // Insert into D1. PII-safe — no IP, no customer name, no payload.
     if (env.DB) {
       try {
         await env.DB.prepare(
-          `INSERT INTO heartbeats (license_id, org_hash, vla_family, hardware_tier, reflex_version, client_timestamp, server_timestamp)
-           VALUES (?, ?, ?, ?, ?, ?, ?)`
+          `INSERT INTO heartbeats (license_id, org_hash, vla_family, hardware_tier, reflex_version, client_timestamp, server_timestamp, model_name, hardware_detail, latency_p50, latency_p95, latency_p99, error_count_24h, safety_violation_count_24h, episode_count_24h, action_dim, embodiment, denoise_steps, inference_mode, tier)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
         )
           .bind(
             payload.license_id,
@@ -107,7 +127,20 @@ export default {
             hardwareTier,
             payload.reflex_version,
             payload.timestamp,
-            new Date().toISOString()
+            new Date().toISOString(),
+            modelName,
+            hardwareDetail,
+            latencyP50,
+            latencyP95,
+            latencyP99,
+            errorCount24h,
+            safetyViolationCount24h,
+            episodeCount24h,
+            actionDim,
+            embodiment,
+            denoiseSteps,
+            inferenceMode,
+            tier
           )
           .run();
       } catch (e) {
