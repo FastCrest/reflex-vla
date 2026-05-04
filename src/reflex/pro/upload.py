@@ -35,7 +35,7 @@ from typing import Any
 logger = logging.getLogger(__name__)
 
 # Upload endpoint. Override via REFLEX_DATA_ENDPOINT for testing.
-DEFAULT_DATA_ENDPOINT = "https://data.fastcrest.workers.dev/v1/episodes/upload"
+DEFAULT_DATA_ENDPOINT = "https://reflex-data.fastcrest.workers.dev/v1/episodes/upload"
 
 # Upload config defaults
 DEFAULT_MAX_RETRIES = 3

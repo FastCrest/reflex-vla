@@ -69,7 +69,7 @@ from typing import Any
 logger = logging.getLogger(__name__)
 
 # Override via REFLEX_TELEMETRY_ENDPOINT for testing / air-gapped deploys.
-DEFAULT_TELEMETRY_ENDPOINT = "https://telemetry.fastcrest.workers.dev/v1/heartbeat"
+DEFAULT_TELEMETRY_ENDPOINT = "https://reflex-telemetry.fastcrest.workers.dev/v1/heartbeat"
 
 # Two-second timeout. Telemetry is best-effort; we never block startup
 # on a slow telemetry endpoint.
