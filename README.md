@@ -197,6 +197,46 @@ curl -X POST http://localhost:8000/act -H 'content-type: application/json' \
 
 `reflex go` auto-detects your hardware (NVIDIA GPU / Jetson / CPU), picks the right model variant for that device, downloads weights from HuggingFace, and starts the /act endpoint. **No editing configs, no separate `reflex export` step, no manual variant selection.** For models that ship as raw PyTorch weights, you get the export command to run next.
 
+### Security — production auth
+
+For production deployments, require an API key on `/act` and `/config`:
+
+```bash
+export REFLEX_API_KEY="$(openssl rand -hex 32)"
+reflex serve ./p0 --host 0.0.0.0 --port 8000 --api-key "$REFLEX_API_KEY"
+```
+
+Authenticated clients should send either the preferred bearer token header or the compatible `X-Reflex-Key` header:
+
+```bash
+curl -X POST http://localhost:8000/act \
+  -H "Authorization: Bearer $REFLEX_API_KEY" \
+  -H "content-type: application/json" \
+  -d '{"instruction":"pick up the red cup","state":[0.1,0.2,0.3,0.4,0.5,0.6]}'
+
+curl -X POST http://localhost:8000/act \
+  -H "X-Reflex-Key: $REFLEX_API_KEY" \
+  -H "content-type: application/json" \
+  -d '{"instruction":"pick up the red cup","state":[0.1,0.2,0.3,0.4,0.5,0.6]}'
+```
+
+The Python client sets `X-Reflex-Key` when `api_key` is provided:
+
+```python
+import os
+
+from reflex.client import ReflexClient
+
+with ReflexClient("http://localhost:8000", api_key=os.environ["REFLEX_API_KEY"]) as client:
+    result = client.act(
+        image=numpy_frame,
+        state=[0.1, 0.2, 0.3, 0.4, 0.5, 0.6],
+        instruction="pick up the red cup",
+    )
+```
+
+`/health` stays unauthenticated so load balancers and orchestrators can probe readiness without credentials.
+
 ### The verb surface
 
 ```
@@ -457,4 +497,3 @@ For commercial licensing inquiries (offering Reflex as a hosted service to compe
 Reflex is built by [FastCrest](https://fastcrest.com). No signup, no telemetry by default.
 
 Made with 🔥 Passion in San Francisco
-
