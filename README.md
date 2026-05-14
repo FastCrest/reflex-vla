@@ -156,8 +156,10 @@ reflex models list
 # Smoke test — probe hardware → resolve model → pull → export → serve
 reflex go --model smolvla-base
 
-# Now make it real with per-robot normalization (ships with franka, so100, ur5)
+# Now make it real with per-robot normalization (ships with franka, so100, ur5, quadcopter)
 reflex go --model smolvla-base --embodiment franka
+# Or for a drone:
+reflex go --model smolvla-base --embodiment quadcopter
 
 # Or with explicit hardware override
 reflex go --model pi05-libero --embodiment franka --device-class a10g
