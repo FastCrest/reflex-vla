@@ -1,4 +1,4 @@
-"""Per-embodiment configs (Franka, SO-100, UR5, Trossen, Stretch, custom).
+"""Per-embodiment configs (Franka, SO-100, UR5, Trossen, Stretch, Quadcopter, custom).
 
 Read by `reflex serve --embodiment <name>` so the runtime knows the robot's
 action space, normalization stats, gripper layout, control rate, and safety
