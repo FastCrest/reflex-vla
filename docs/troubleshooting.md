@@ -153,6 +153,45 @@ dpkg -l | grep nvidia-l4t-core
 
 JetPack 5.x is not supported. The v0.9.4 doctor guard parses `/etc/nv_tegra_release`, detects R35, and surfaces the upgrade path loudly — without it, ORT silently falls back to CPU and you get useless latency numbers.
 
+### `A module that was compiled using NumPy 1.x cannot be run in NumPy 2.x`
+
+```
+ImportError: A module that was compiled using NumPy 1.x cannot be run in NumPy 2.2.6
+```
+
+**Cause:** The Jetson AI Lab `torch` and `onnxruntime-gpu` wheels are compiled against NumPy 1.x C ABI. If `numpy>=2.0` is installed (pip's default), both libraries crash on import.
+
+**Fix:** Pin `numpy<2` **before** installing torch or onnxruntime-gpu:
+```bash
+pip install 'numpy<2'
+# Then install torch / ort from the Jetson AI Lab index
+```
+
+If you already installed numpy 2.x, downgrade:
+```bash
+pip install 'numpy<2' --force-reinstall
+```
+
+### `No matching distribution found for lerobot==0.5.1` (Python 3.10)
+
+```
+ERROR: Could not find a version that satisfies the requirement lerobot==0.5.1; extra == "monolithic"
+ERROR: Ignored the following versions that require a different python version: 0.5.0 Requires-Python >=3.12; 0.5.1 Requires-Python >=3.12
+```
+
+**Cause:** The `[monolithic]` (and `[native]`, `[rtc]`) extras depend on `lerobot==0.5.1`, which requires Python ≥ 3.12. JetPack 6 ships Python 3.10.
+
+**Fix:** On Jetson, install `[serve]` only — **not** `[monolithic]`:
+```bash
+pip install 'reflex-vla[serve]'
+```
+
+The monolithic ONNX export (`reflex export --monolithic`) requires lerobot and must run on a **Python 3.12+ host** (desktop, cloud GPU, or Docker). Export there, then copy the ONNX to the Jetson and serve it:
+```bash
+# On Jetson — serve a pre-exported model
+reflex serve /path/to/exported/model/
+```
+
 ### `Thermal throttling during inference`
 
 **Symptoms:** Latency spikes after 5–10 minutes of continuous inference.
