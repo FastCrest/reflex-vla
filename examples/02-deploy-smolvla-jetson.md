@@ -6,14 +6,36 @@
 
 ## Install on the Jetson
 
+For Jetson Orin (AGX / Nano), do **not** use the standard `[gpu]` extra from PyPI. The standard PyPI `onnxruntime-gpu` wheel and its CUDA support libraries are compiled for `x86_64` only and will fail to resolve on `aarch64` (resulting in a `ResolutionImpossible` dependency conflict).
+
+Instead, run the bootstrap installer included in the repo:
 ```bash
-pip install 'reflex-vla[serve,gpu,monolithic]'
+./install.sh
 ```
 
-Why those extras:
+Or install manually:
+```bash
+# 1. Install base package with serve and monolithic extras (excluding standard [gpu])
+pip install 'reflex-vla[serve,monolithic]'
+
+# 2. Pin numpy<2 for Jetson Zoo ABI compatibility
+pip install 'numpy<2'
+
+# 3. Install the Jetson-compatible onnxruntime-gpu wheel from the Jetson AI Lab index
+pip install --upgrade --index-url https://pypi.jetson-ai-lab.io/jp6/cu126 onnxruntime-gpu
+```
+
+### Adding `reflex` to your PATH
+Since system-wide packages are often read-only on Jetson, `pip` installs `reflex` to `~/.local/bin`. If you receive `reflex: command not found`, add it to your `PATH`:
+```bash
+export PATH="$HOME/.local/bin:$PATH"
+echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.bashrc
+```
+
+### Why those extras:
 - `serve` — FastAPI + uvicorn for the HTTP inference server
-- `gpu` — `onnxruntime-gpu` (links to CUDA on the Jetson via the nvidia container runtime)
 - `monolithic` — `lerobot` + `transformers==5.3.0` + `onnx-diagnostic`, the cos=+1.0 verified export path
+- `onnxruntime-gpu` (installed from Jetson AI Lab) — Jetson-specific, GPU-accelerated inference backend optimized for JetPack.
 
 This pulls ~2 GB of dependencies. Takes 5-10 minutes on the Jetson.
 

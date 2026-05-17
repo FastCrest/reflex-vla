@@ -26,10 +26,16 @@ python3 -c "import onnxruntime; print(onnxruntime.__version__, onnxruntime.get_a
 pip install 'onnxruntime-gpu>=1.25.1' 'nvidia-cudnn-cu12>=9.5' 'nvidia-cublas-cu12>=12.6'
 ```
 
-**Jetson fix:** On JetPack 6.0+, use the NVIDIA-provided ORT wheel from the Jetson Zoo (NOT the desktop x86 wheel — that crashes or falls back to CPU silently):
+**Jetson fix:** On JetPack 6.0+, do not install the `[gpu]` extra from standard PyPI (since those wheels are `x86_64` only). Install `[serve,monolithic]` and then pull the Jetson-compatible `onnxruntime-gpu` wheel from the Jetson AI Lab index:
 ```bash
-# JetPack 6 / R36 / Python 3.10
-pip install onnxruntime-gpu --extra-index-url https://elinux.org/Jetson_Zoo
+# Pin numpy<2 for Jetson Zoo ABI compatibility
+pip install 'numpy<2'
+
+# JetPack 6.0 / 6.1 (cu126)
+pip install onnxruntime-gpu --extra-index-url https://pypi.jetson-ai-lab.io/jp6/cu126
+
+# Or JetPack 6.2+ (cu129)
+pip install onnxruntime-gpu --extra-index-url https://pypi.jetson-ai-lab.io/jp6/cu129
 ```
 
 JetPack 5.x (R35 / CUDA 11.4) is not supported — `reflex doctor` will flag this loudly with the upgrade path.
