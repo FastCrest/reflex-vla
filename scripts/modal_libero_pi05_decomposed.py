@@ -207,6 +207,7 @@ def run_decomposed_libero(
     persists on the volume). Filename encodes task/ep/seed/steps/success.
     """
     import logging
+    from pathlib import Path  # used in the run_libero_rollout label below
 
     # The Pi05DecomposedInference module uses logger.info(...) for provider
     # diagnostics; default root handler is WARN which swallows those.
