@@ -440,12 +440,19 @@ def run_parity(
                 captured[name] = out[0] if isinstance(out, tuple) else out
             return hook
 
+        def make_pre_hook(name):
+            def pre_hook(module, inp):
+                captured[name] = inp[0] if isinstance(inp, tuple) and len(inp) > 0 else inp
+            return pre_hook
+
         ler_layers = _temp_policy.model.paligemma_with_expert.gemma_expert.model.layers
         my_layers = vla.vla_head.expert_stack.layers
 
         target_layers = [0, 8, 17]
-        ler_handles = [ler_layers[i].register_forward_hook(make_hook(f"ler_{i}")) for i in target_layers]
-        my_handles = [my_layers[i].register_forward_hook(make_hook(f"my_{i}")) for i in target_layers]
+        ler_handles = [ler_layers[i].register_forward_hook(make_hook(f"ler_{i}_out")) for i in target_layers]
+        my_handles = [my_layers[i].register_forward_hook(make_hook(f"my_{i}_out")) for i in target_layers]
+        ler_pre_handles = [ler_layers[i].register_forward_pre_hook(make_pre_hook(f"ler_{i}_in")) for i in target_layers]
+        my_pre_handles = [my_layers[i].register_forward_pre_hook(make_pre_hook(f"my_{i}_in")) for i in target_layers]
         try:
             ler_pkv_copy2 = _copy.deepcopy(ler_pkv)
             _temp_policy.model.denoise_step(
@@ -460,19 +467,29 @@ def run_parity(
                 state_emb=my_state_emb.unsqueeze(1), attn_mask=suffix_2d,
             )
             for i in target_layers:
-                ler_li = captured[f"ler_{i}"]
-                my_li = captured[f"my_{i}"]
-                # lerobot's layer output is for FULL sequence (state + actions = 51); mine same.
-                if ler_li.shape != my_li.shape:
-                    print(f"  Layer-{i} shape mismatch: lerobot {ler_li.shape}, mine {my_li.shape}")
+                ler_in = captured.get(f"ler_{i}_in")
+                my_in = captured.get(f"my_{i}_in")
+                ler_out = captured[f"ler_{i}_out"]
+                my_out = captured[f"my_{i}_out"]
+
+                # Input diff
+                if ler_in is not None and my_in is not None and ler_in.shape == my_in.shape:
+                    d_in = (ler_in.float() - my_in.float()).abs()
+                    print(f"  Layer-{i} INPUT:  shape {ler_in.shape}, diff max {d_in.max():.4e}, mean {d_in.mean():.4e}")
+                else:
+                    print(f"  Layer-{i} INPUT: shape mismatch or missing (ler={ler_in.shape if ler_in is not None else None}, my={my_in.shape if my_in is not None else None})")
+
+                # Output diff
+                if ler_out.shape != my_out.shape:
+                    print(f"  Layer-{i} OUTPUT shape mismatch: lerobot {ler_out.shape}, mine {my_out.shape}")
                     continue
-                d = (ler_li.float() - my_li.float()).abs()
-                print(f"  Layer-{i}: shape {ler_li.shape}, lerobot norm {ler_li.norm():.4f}, mine norm {my_li.norm():.4f}, diff max {d.max():.4e}, mean {d.mean():.4e}")
+                d_out = (ler_out.float() - my_out.float()).abs()
+                print(f"  Layer-{i} OUTPUT: shape {ler_out.shape}, ler norm {ler_out.norm():.4f}, my norm {my_out.norm():.4f}, diff max {d_out.max():.4e}, mean {d_out.mean():.4e}")
                 if i == 0:
-                    # Sample a row for inspection
-                    print(f"    layer-0 first row [:8]: lerobot {ler_li[0, 0, :8]}  mine {my_li[0, 0, :8]}")
+                    print(f"    layer-0 first-row[:8] INPUT:  ler {ler_in[0, 0, :8]}  my {my_in[0, 0, :8]}")
+                    print(f"    layer-0 first-row[:8] OUTPUT: ler {ler_out[0, 0, :8]}  my {my_out[0, 0, :8]}")
         finally:
-            for h in ler_handles + my_handles:
+            for h in ler_handles + my_handles + ler_pre_handles + my_pre_handles:
                 h.remove()
 
         del _temp_policy, policy
