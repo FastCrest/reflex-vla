@@ -57,7 +57,10 @@ def _sinusoidal_pos_embedding(t, dim, min_p=4e-3, max_p=4.0):
 
 
 class _DecomposedRoPE(nn.Module):
-    def __init__(self, dim, max_seq_len=512, base=10000.0):
+    # max_seq_len=2048 covers pi0 full inference (3 images × 256 + lang ~256 +
+    # state 1 + chunk_size 50 ≈ 1100 absolute positions; was 512 which OOB'd
+    # at position ~775 during the Day 4h parity run).
+    def __init__(self, dim, max_seq_len=2048, base=10000.0):
         super().__init__()
         inv_freq = 1.0 / (base ** (torch.arange(0, dim, 2).float() / dim))
         freqs = torch.outer(torch.arange(max_seq_len).float(), inv_freq)
