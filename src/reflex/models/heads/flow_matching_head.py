@@ -173,9 +173,28 @@ class FlowMatchingHead(VLAHead, nn.Module):
         Returns:
             `[batch, chunk, action_dim]` denoised actions.
         """
-        # Pi0ExpertStackWithPrefix has a narrower forward signature — only
-        # the prefix_k/prefix_v path. Detect + route.
-        from reflex.exporters.pi0_prefix_exporter import Pi0ExpertStackWithPrefix
+        # Detect prefix-aware expert variants — Pi0 (with state) or Pi05
+        # (action-only suffix + AdaRMSNorm time conditioning). Both consume
+        # per-layer prefix K/V and route through this head.
+        from reflex.exporters.pi0_prefix_exporter import (
+            Pi0ExpertStackWithPrefix,
+            Pi05ExpertStackWithPrefix,
+        )
+        if isinstance(self.expert_stack, Pi05ExpertStackWithPrefix):
+            if prefix_k is None or prefix_v is None:
+                raise ValueError(
+                    "Pi05ExpertStackWithPrefix requires prefix_k + prefix_v "
+                    "(per-layer VLM prefix K/V from PaliGemma's past_key_values)."
+                )
+            # pi0.5 has NO state_emb — silently drop if passed
+            return self.expert_stack(
+                noisy_actions=noisy_actions,
+                timestep=timestep,
+                position_ids=position_ids,
+                prefix_k=prefix_k,
+                prefix_v=prefix_v,
+                attn_mask=attn_mask,
+            )
         if isinstance(self.expert_stack, Pi0ExpertStackWithPrefix):
             if prefix_k is None or prefix_v is None:
                 raise ValueError(

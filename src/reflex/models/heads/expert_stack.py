@@ -260,9 +260,123 @@ class ExpertStack(nn.Module):
         return self.action_out_proj(x)
 
 
+class Pi05ExpertGQALayer(nn.Module):
+    """pi0.5 expert layer — AdaRMSNorm + prefix-concat + AdaLN gating.
+
+    Mirrors `ExpertGQALayer` (the pi0/SmolVLA layer) but with the three
+    pi0.5-specific changes:
+
+    1. **AdaRMSNorm** (input + post_attention) — per-layer normalization
+       conditioned on the time embedding. Returns `(normed, gate)` where
+       `gate` modulates the residual SIDE (AdaLN pattern).
+    2. **AdaLN gating** — residual = res + block_out * gate (NOT plain
+       `res + block_out`). The gate comes from the SAME norm call as the
+       pre-block normalization. Matches lerobot `_gated_residual` at
+       `pi_gemma.py:54-66` and `_PiGemmaDecoderLayerBase.forward:158-188`.
+    3. **MLP activation** — `gelu(approximate="tanh")` (Gemma default per
+       `transformers/models/gemma/configuration_gemma.py:119`), NOT silu.
+       Day 4h surfaced this bug in pi0's ExpertGQALayer; pi0.5 inherits the
+       fix.
+
+    Attention modes: SAME as ExpertGQALayer — self-attn (default),
+    cross-attn (SmolVLA), or block-causal prefix concat (pi0.5).
+    """
+
+    def __init__(self, hidden, nq, nkv, hd, inter, kv_in=None, rope_theta=10000.0):
+        super().__init__()
+        from reflex.decompose import DecomposedAdaRMSNorm
+        self.nq, self.nkv, self.hd = nq, nkv, hd
+        self.kv_groups = nq // nkv
+        self.input_layernorm = DecomposedAdaRMSNorm(hidden, time_dim=hidden)
+        self.post_attention_layernorm = DecomposedAdaRMSNorm(hidden, time_dim=hidden)
+        self.q_proj = nn.Linear(hidden, nq * hd, bias=False)
+        self.k_proj = nn.Linear(kv_in or hidden, nkv * hd, bias=False)
+        self.v_proj = nn.Linear(kv_in or hidden, nkv * hd, bias=False)
+        self.o_proj = nn.Linear(nq * hd, hidden, bias=False)
+        self.gate_proj = nn.Linear(hidden, inter, bias=False)
+        self.up_proj = nn.Linear(hidden, inter, bias=False)
+        self.down_proj = nn.Linear(inter, hidden, bias=False)
+        self.rope = _DecomposedRoPE(hd, base=rope_theta)
+
+    def forward(
+        self,
+        x,
+        pos_ids,
+        time_emb,
+        cross_k=None,
+        cross_v=None,
+        kv_mask=None,
+        prefix_k_concat=None,
+        prefix_v_concat=None,
+        attn_mask=None,
+    ):
+        """One pi0.5 transformer layer with AdaLN gating.
+
+        Args:
+            x: `[B, suffix_len, hidden]` action-only suffix (no state token
+                — pi0.5 uses state-in-language).
+            pos_ids: `[B, suffix_len]` absolute position ids (offset by prefix_len).
+            time_emb: `[B, hidden]` time-conditioned embedding for AdaRMSNorm.
+            prefix_k_concat / prefix_v_concat: per-layer K/V from PaliGemma prefill.
+            attn_mask: optional bool `[B, 1, S, K]` for block attention.
+
+        Other kwargs mirror ExpertGQALayer.
+        """
+        b, s, _ = x.shape
+        # Input layernorm — returns (normed, gate) for AdaLN gating
+        res = x
+        x_norm, gate_attn = self.input_layernorm(x, time_emb, return_gate=True)
+
+        q = self.q_proj(x_norm).view(b, s, self.nq, self.hd).transpose(1, 2)
+
+        is_cross = cross_k is not None
+        use_prefix_concat = prefix_k_concat is not None
+        k_src = cross_k if is_cross else x_norm
+        v_src = cross_v if is_cross else x_norm
+        action_kv_len = k_src.shape[1]
+
+        k = self.k_proj(k_src).view(b, action_kv_len, self.nkv, self.hd).transpose(1, 2)
+        v = self.v_proj(v_src).view(b, action_kv_len, self.nkv, self.hd).transpose(1, 2)
+        q = self.rope.apply(q, pos_ids)
+        if not is_cross:
+            k = self.rope.apply(k, pos_ids)
+
+        if use_prefix_concat:
+            pk = prefix_k_concat
+            pv = prefix_v_concat
+            if pk.ndim == 4 and pk.shape[1] != self.nkv:
+                pk = pk.transpose(1, 2)
+                pv = pv.transpose(1, 2)
+            k = torch.cat([pk, k], dim=2)
+            v = torch.cat([pv, v], dim=2)
+
+        kv_len = k.shape[2]
+        k = k.unsqueeze(2).expand(-1, -1, self.kv_groups, -1, -1).reshape(b, self.nq, kv_len, self.hd)
+        v = v.unsqueeze(2).expand(-1, -1, self.kv_groups, -1, -1).reshape(b, self.nq, kv_len, self.hd)
+
+        scores = torch.matmul(q, k.transpose(-2, -1)) / math.sqrt(self.hd)
+        if is_cross and kv_mask is not None:
+            mask = kv_mask[:, None, None, :]
+            scores = scores.masked_fill(~mask, -1e9)
+        elif use_prefix_concat and attn_mask is not None:
+            scores = scores.masked_fill(~attn_mask, -1e9)
+        attn = F.softmax(scores, dim=-1)
+
+        attn_out = self.o_proj(torch.matmul(attn, v).transpose(1, 2).contiguous().view(b, s, -1))
+        # AdaLN gating: res + attn_out * gate (NOT plain residual)
+        x = res + attn_out * gate_attn
+
+        # MLP block — same pattern: post-layernorm returns (normed, gate_mlp)
+        res = x
+        x_norm, gate_mlp = self.post_attention_layernorm(x, time_emb, return_gate=True)
+        mlp_out = self.down_proj(F.gelu(self.gate_proj(x_norm), approximate="tanh") * self.up_proj(x_norm))
+        return res + mlp_out * gate_mlp
+
+
 __all__ = [
     "_sinusoidal_pos_embedding",
     "_DecomposedRoPE",
     "ExpertGQALayer",
+    "Pi05ExpertGQALayer",
     "ExpertStack",
 ]
