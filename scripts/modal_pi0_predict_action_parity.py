@@ -275,6 +275,55 @@ def run_parity(
     import gc
     gc.collect()
 
+    # ─── 5b. Intermediate-tensor parity diff ──────────────────────────
+    # Compare my pipeline vs lerobot's STEP-BY-STEP — embedding, prefix
+    # prefill, state_emb, first denoise step. The first row that diverges
+    # is the bug location.
+    print("\n=== Step 5b: Intermediate-tensor parity ===", flush=True)
+    with torch.no_grad():
+        # Re-load lerobot to compute reference intermediates (policy was deleted).
+        from lerobot.policies.pi0.modeling_pi0 import PI0Policy
+        _temp_policy = PI0Policy.from_pretrained("lerobot/pi0_base").eval()
+        _temp_policy = _temp_policy.to(dtype=torch.float32).to("cpu")
+        ler_prefix_embs, ler_prefix_pad, ler_prefix_att = _temp_policy.model.embed_prefix(
+            images, img_masks, lang_tokens, lang_masks
+        )
+
+        # My pipeline's embed (must match pi0.py:258-290 exactly)
+        my_image_embs = []
+        text_hidden = vla.llm_backbone.text_hidden_size
+        inv_sqrt_h = 1.0 / (text_hidden ** 0.5)
+        for img in images:
+            e = vla.vision_backbone(img)
+            e = vla.llm_backbone.multi_modal_projector(e)
+            e = e * inv_sqrt_h
+            my_image_embs.append(e)
+        my_text_emb = vla.llm_backbone.embed_tokens(lang_tokens)
+        my_prefix_embs = torch.cat([*my_image_embs, my_text_emb], dim=1)
+
+        # Per-region norms (image tokens, text tokens)
+        img_token_count = ler_prefix_embs.shape[1] - lang_tokens.shape[1]  # 768
+        print(f"  Prefix shape: lerobot {ler_prefix_embs.shape}, mine {my_prefix_embs.shape}")
+        print(f"  Prefix total norm:    lerobot {ler_prefix_embs.norm():.4f}  mine {my_prefix_embs.norm():.4f}")
+        print(f"  Image-region norm:    lerobot {ler_prefix_embs[:, :img_token_count].norm():.4f}  mine {my_prefix_embs[:, :img_token_count].norm():.4f}")
+        print(f"  Text-region norm:     lerobot {ler_prefix_embs[:, img_token_count:].norm():.4f}  mine {my_prefix_embs[:, img_token_count:].norm():.4f}")
+        print(f"  Sample img tok[0, 0, :5]:  lerobot {ler_prefix_embs[0, 0, :5]}  mine {my_prefix_embs[0, 0, :5]}")
+        print(f"  Sample text tok[0, {img_token_count}, :5]: lerobot {ler_prefix_embs[0, img_token_count, :5]}  mine {my_prefix_embs[0, img_token_count, :5]}")
+
+        embed_diff = (ler_prefix_embs - my_prefix_embs).abs()
+        print(f"  Embed diff: max {embed_diff.max():.4e}  mean {embed_diff.mean():.4e}")
+
+        # Compare state_emb
+        ler_state_emb = _temp_policy.model.state_proj(state_tensor.to(torch.float32))
+        my_state_emb = vla.projector(state_tensor)
+        print(f"\n  State emb shape: lerobot {ler_state_emb.shape}, mine {my_state_emb.shape}")
+        state_diff = (ler_state_emb - my_state_emb).abs()
+        print(f"  State emb diff: max {state_diff.max():.4e}  mean {state_diff.mean():.4e}")
+
+        del _temp_policy
+        gc.collect()
+    step("intermediate_parity", "pass", "see prints above")
+
     # ─── 6. Run Pi0VLA.predict_action ──────────────────────────────────
     print("\n=== Step 6: Pi0VLA.predict_action ===", flush=True)
     start = time.time()
