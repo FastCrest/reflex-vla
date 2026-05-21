@@ -270,21 +270,17 @@ def run_parity(
     step("build_vla", "pass",
          f"{time.time() - start:.1f}s, paligemma+expert+state_proj inherited from lerobot policy")
 
-    # NOW free lerobot — we have references via vla
-    del policy
+    # Don't delete policy yet — Step 5b needs it for intermediate comparison.
+    # paligemma/expert/state_proj are shared (vla submodules reference the
+    # same nn.Modules), so del-ing policy wouldn't actually free memory anyway.
     import gc
-    gc.collect()
 
     # ─── 5b. Intermediate-tensor parity diff ──────────────────────────
     # Compare my pipeline vs lerobot's STEP-BY-STEP — embedding, prefix
-    # prefill, state_emb, first denoise step. The first row that diverges
-    # is the bug location.
+    # prefill, state_emb, first denoise step.
     print("\n=== Step 5b: Intermediate-tensor parity ===", flush=True)
+    _temp_policy = policy  # reuse — no re-load
     with torch.no_grad():
-        # Re-load lerobot to compute reference intermediates (policy was deleted).
-        from lerobot.policies.pi0.modeling_pi0 import PI0Policy
-        _temp_policy = PI0Policy.from_pretrained("lerobot/pi0_base").eval()
-        _temp_policy = _temp_policy.to(dtype=torch.float32).to("cpu")
         ler_prefix_embs, ler_prefix_pad, ler_prefix_att = _temp_policy.model.embed_prefix(
             images, img_masks, lang_tokens, lang_masks
         )
@@ -433,7 +429,7 @@ def run_parity(
         print(f"  v_t norm: lerobot {v_t_ler.norm():.4f}  mine {v_t_mine.norm():.4f}")
         print(f"  v_t[0, 0, :8]: lerobot {v_t_ler[0, 0, :8]}  mine {v_t_mine[0, 0, :8]}")
 
-        del _temp_policy
+        del _temp_policy, policy
         gc.collect()
     step("intermediate_parity", "pass", "see prints above")
 
