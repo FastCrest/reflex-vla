@@ -295,6 +295,47 @@ def run_parity(
     print(f"  err_max  = {err_max:.4e}", flush=True)
     print(f"  first_action_cos = {cos:+.6f}", flush=True)
 
+    # ─── Diagnostic localization ─────────────────────────────────────
+    # Per-action-position error (across all 32 features), per-feature error
+    # (across all 50 positions). Identifies whether divergence is concentrated
+    # at a specific timestep or feature dim.
+    diff_3d = oracle_actions - vla_actions  # [B, chunk_size, action_dim]
+    per_pos_err = np.abs(diff_3d).mean(axis=(0, 2))  # [chunk_size]
+    per_feat_err = np.abs(diff_3d).mean(axis=(0, 1))  # [action_dim]
+
+    print(f"\n  per-position errors (mean across features):")
+    print(f"    first 5:  {per_pos_err[:5]}")
+    print(f"    last 5:   {per_pos_err[-5:]}")
+    print(f"    argmax pos: idx={per_pos_err.argmax()}, val={per_pos_err.max():.4e}")
+    print(f"    argmin pos: idx={per_pos_err.argmin()}, val={per_pos_err.min():.4e}")
+
+    print(f"\n  per-feature errors (mean across positions):")
+    print(f"    first 5:  {per_feat_err[:5]}")
+    print(f"    last 5:   {per_feat_err[-5:]}")
+    print(f"    argmax feat: idx={per_feat_err.argmax()}, val={per_feat_err.max():.4e}")
+
+    # First action vs last action — direction comparison
+    print(f"\n  oracle action[0, 0, :8] = {oracle_actions[0, 0, :8]}")
+    print(f"  vla    action[0, 0, :8] = {vla_actions[0, 0, :8]}")
+    print(f"  oracle action[0, -1, :8] = {oracle_actions[0, -1, :8]}")
+    print(f"  vla    action[0, -1, :8] = {vla_actions[0, -1, :8]}")
+
+    # Cosine across all 50 actions
+    cos_per_pos = []
+    for t in range(oracle_actions.shape[1]):
+        o = oracle_actions[0, t]
+        v = vla_actions[0, t]
+        c = float(np.dot(o, v) / (np.linalg.norm(o) * np.linalg.norm(v) + 1e-8))
+        cos_per_pos.append(c)
+    print(f"\n  per-position cosine sim (first/min/mean/max):")
+    print(f"    first 5: {[f'{c:+.3f}' for c in cos_per_pos[:5]]}")
+    print(f"    last 5:  {[f'{c:+.3f}' for c in cos_per_pos[-5:]]}")
+    print(f"    mean: {np.mean(cos_per_pos):+.4f}, min: {np.min(cos_per_pos):+.4f}, max: {np.max(cos_per_pos):+.4f}")
+
+    metrics["per_pos_err_max_idx"] = int(per_pos_err.argmax())
+    metrics["per_pos_err_max_val"] = float(per_pos_err.max())
+    metrics["mean_cos_across_positions"] = float(np.mean(cos_per_pos))
+
     # ─── 8. Verdict ────────────────────────────────────────────────────
     passed = (err_max < 1e-4) and (err_p95 < 1e-5)
     results["passed"] = passed

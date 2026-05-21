@@ -204,6 +204,8 @@ class Pi0VLA(BaseVLA):
         noise: torch.Tensor | None = None,
         num_steps: int = 10,
         chunk_size: int = 50,
+        _use_suffix_attn_mask: bool = True,
+        _scale_images: bool = True,
     ) -> torch.Tensor:
         """Full pi0 inference: vision → merge → prefix prefill → denoise loop.
 
@@ -281,7 +283,8 @@ class Pi0VLA(BaseVLA):
             img_emb = self.vision_backbone(img)
             # PaliGemma projection: [B, 256, 1152] → [B, 256, 2048]
             img_emb = self.llm_backbone.multi_modal_projector(img_emb)
-            img_emb = img_emb * inv_sqrt_h  # matches stock get_image_features:244
+            if _scale_images:
+                img_emb = img_emb * inv_sqrt_h  # matches stock get_image_features:244
             image_embeds_list.append(img_emb)
 
         text_embs = self.llm_backbone.embed_tokens(lang_tokens)
@@ -420,7 +423,7 @@ class Pi0VLA(BaseVLA):
                 prefix_k=prefix_k,
                 prefix_v=prefix_v,
                 state_emb=state_emb,
-                attn_mask=suffix_attn_mask,
+                attn_mask=suffix_attn_mask if _use_suffix_attn_mask else None,
             )
             x_t = x_t + dt * v_t
 
