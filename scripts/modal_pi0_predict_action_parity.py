@@ -289,16 +289,15 @@ def run_parity(
             images, img_masks, lang_tokens, lang_masks
         )
 
-        # My pipeline's embed (must match pi0.py:258-290 exactly)
+        # My pipeline's embed (must mirror pi0.py:258-285 — text pre-scaled, image raw)
         my_image_embs = []
         text_hidden = vla.llm_backbone.text_hidden_size
-        inv_sqrt_h = 1.0 / (text_hidden ** 0.5)
+        sqrt_h = text_hidden ** 0.5
         for img in images:
             e = vla.vision_backbone(img)
             e = vla.llm_backbone.multi_modal_projector(e)
-            e = e * inv_sqrt_h
             my_image_embs.append(e)
-        my_text_emb = vla.llm_backbone.embed_tokens(lang_tokens)
+        my_text_emb = vla.llm_backbone.embed_tokens(lang_tokens) * sqrt_h
         my_prefix_embs = torch.cat([*my_image_embs, my_text_emb], dim=1)
 
         # Per-region norms (image tokens, text tokens)
@@ -319,6 +318,63 @@ def run_parity(
         print(f"\n  State emb shape: lerobot {ler_state_emb.shape}, mine {my_state_emb.shape}")
         state_diff = (ler_state_emb - my_state_emb).abs()
         print(f"  State emb diff: max {state_diff.max():.4e}  mean {state_diff.mean():.4e}")
+
+        # Compare prefix prefill K/V — this is the bridge between prefix embedding
+        # and the expert's attention. If embeds match but PKV diverges, the bug is
+        # in the prefill (attention mask, position_ids, attn impl, dtype path).
+        print(f"\n  --- Prefix prefill K/V comparison ---")
+        # Lerobot side: invoke paligemma_with_expert.forward with the full block mask
+        # the way denoise_step would set it up (without the suffix part).
+        import math as _math
+        ler_prefix_pad = ler_prefix_pad.to(torch.bool)
+        # Build lerobot's prefix att 2d mask (bidirectional within prefix)
+        from lerobot.policies.pi0.modeling_pi0 import make_att_2d_masks
+        ler_prefix_2d = make_att_2d_masks(ler_prefix_pad, ler_prefix_att)  # [B, p, p]
+        # 4D format for paligemma
+        neg_inf = torch.finfo(ler_prefix_embs.dtype).min
+        ler_prefix_4d = torch.where(ler_prefix_2d.unsqueeze(1),
+                                    torch.zeros((), dtype=ler_prefix_embs.dtype),
+                                    torch.full((), neg_inf, dtype=ler_prefix_embs.dtype))
+        ler_pos = torch.cumsum(ler_prefix_pad.long(), dim=1) - 1
+        _temp_policy.model.paligemma_with_expert.paligemma.model.language_model.config._attn_implementation = "eager"
+        ler_prefix_out, ler_pkv = _temp_policy.model.paligemma_with_expert.forward(
+            inputs_embeds=[ler_prefix_embs, None],
+            past_key_values=None,
+            attention_mask=ler_prefix_4d,
+            position_ids=ler_pos,
+            use_cache=True,
+            adarms_cond=[None, None],
+        )
+        ler_pkv_l0_k = ler_pkv.layers[0].keys
+        print(f"  Lerobot prefill: pkv layers={len(ler_pkv.layers)}, layer-0 K shape={ler_pkv_l0_k.shape}")
+
+        # My side: same flow as pi0.py:295-356
+        valid_pair = ler_prefix_pad[:, :, None] & ler_prefix_pad[:, None, :]
+        my_prefix_4d = torch.where(valid_pair.unsqueeze(1),
+                                   torch.zeros((), dtype=my_prefix_embs.dtype),
+                                   torch.full((), neg_inf, dtype=my_prefix_embs.dtype))
+        my_pos = torch.cumsum(ler_prefix_pad.long(), dim=1) - 1
+        vla.llm_backbone.language_model.config._attn_implementation = "eager"
+        my_prefill = vla.llm_backbone(
+            inputs_embeds=my_prefix_embs,
+            attention_mask=my_prefix_4d,
+            position_ids=my_pos,
+            use_cache=True,
+        )
+        my_pkv = my_prefill.past_key_values
+        my_pkv_l0_k = my_pkv.layers[0].keys if hasattr(my_pkv, "layers") else my_pkv.key_cache[0]
+        print(f"  Mine prefill:    pkv layers={len(my_pkv.layers if hasattr(my_pkv,'layers') else my_pkv.key_cache)}, layer-0 K shape={my_pkv_l0_k.shape}")
+
+        pkv_diff = (ler_pkv_l0_k - my_pkv_l0_k).abs()
+        print(f"  Layer-0 K diff: max {pkv_diff.max():.4e}  mean {pkv_diff.mean():.4e}")
+        print(f"  Layer-0 K norm: lerobot {ler_pkv_l0_k.norm():.4f}  mine {my_pkv_l0_k.norm():.4f}")
+
+        # Also compare a deeper layer (layer 8) and the last one
+        for li in (8, len(ler_pkv.layers) - 1):
+            ler_li = ler_pkv.layers[li].keys
+            my_li = my_pkv.layers[li].keys if hasattr(my_pkv, "layers") else my_pkv.key_cache[li]
+            d = (ler_li - my_li).abs()
+            print(f"  Layer-{li} K diff: max {d.max():.4e}  mean {d.mean():.4e}  (ler norm {ler_li.norm():.2f} vs mine {my_li.norm():.2f})")
 
         del _temp_policy
         gc.collect()
