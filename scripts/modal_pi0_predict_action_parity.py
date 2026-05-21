@@ -492,6 +492,57 @@ def run_parity(
             for h in ler_handles + my_handles + ler_pre_handles + my_pre_handles:
                 h.remove()
 
+        # ─── Intra-layer-0 sub-module diff ─────────────────────────────
+        # Hook sub-modules of layer 0: input_layernorm, q/k/v/o_proj,
+        # post_attention_layernorm. Diff each.
+        print(f"\n  --- Intra-layer-0 sub-module diff ---")
+        sub_captured: dict = {}
+        def make_sub_hook(name):
+            def hook(module, inp, out):
+                sub_captured[name] = out[0] if isinstance(out, tuple) else out
+            return hook
+
+        ler_l0 = ler_layers[0]
+        my_l0 = my_layers[0]
+        sub_hooks = [
+            ler_l0.input_layernorm.register_forward_hook(make_sub_hook("ler_input_ln")),
+            my_l0.input_layernorm.register_forward_hook(make_sub_hook("my_input_ln")),
+            ler_l0.self_attn.q_proj.register_forward_hook(make_sub_hook("ler_q_proj")),
+            my_l0.q_proj.register_forward_hook(make_sub_hook("my_q_proj")),
+            ler_l0.self_attn.k_proj.register_forward_hook(make_sub_hook("ler_k_proj")),
+            my_l0.k_proj.register_forward_hook(make_sub_hook("my_k_proj")),
+            ler_l0.self_attn.v_proj.register_forward_hook(make_sub_hook("ler_v_proj")),
+            my_l0.v_proj.register_forward_hook(make_sub_hook("my_v_proj")),
+            ler_l0.self_attn.o_proj.register_forward_hook(make_sub_hook("ler_o_proj")),
+            my_l0.o_proj.register_forward_hook(make_sub_hook("my_o_proj")),
+            ler_l0.post_attention_layernorm.register_forward_hook(make_sub_hook("ler_post_ln")),
+            my_l0.post_attention_layernorm.register_forward_hook(make_sub_hook("my_post_ln")),
+        ]
+        try:
+            ler_pkv_copy3 = _copy.deepcopy(ler_pkv)
+            _temp_policy.model.denoise_step(
+                state_tensor.to(torch.float32), ler_prefix_pad, ler_pkv_copy3,
+                noise.clone(), torch.tensor([1.0], dtype=torch.float32),
+            )
+            _ = vla.vla_head(
+                noisy_actions=noise.clone(),
+                timestep=torch.tensor([1.0], dtype=torch.float32),
+                position_ids=suffix_position_ids,
+                prefix_k=my_prefix_k, prefix_v=my_prefix_v,
+                state_emb=my_state_emb.unsqueeze(1), attn_mask=suffix_2d,
+            )
+            for name in ["input_ln", "q_proj", "k_proj", "v_proj", "o_proj", "post_ln"]:
+                ler_x = sub_captured[f"ler_{name}"]
+                my_x = sub_captured[f"my_{name}"]
+                if ler_x.shape != my_x.shape:
+                    print(f"  {name}: shape mismatch ler={ler_x.shape} my={my_x.shape}")
+                    continue
+                d = (ler_x.float() - my_x.float()).abs()
+                print(f"  {name}: shape {ler_x.shape}, ler norm {ler_x.norm():.4f}, my norm {my_x.norm():.4f}, diff max {d.max():.4e}, mean {d.mean():.4e}")
+        finally:
+            for h in sub_hooks:
+                h.remove()
+
         del _temp_policy, policy
         gc.collect()
     step("intermediate_parity", "pass", "see prints above")
