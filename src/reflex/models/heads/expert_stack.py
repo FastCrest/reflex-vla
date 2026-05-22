@@ -62,14 +62,33 @@ class _DecomposedRoPE(nn.Module):
     # at position ~775 during the Day 4h parity run).
     def __init__(self, dim, max_seq_len=2048, base=10000.0):
         super().__init__()
-        inv_freq = 1.0 / (base ** (torch.arange(0, dim, 2).float() / dim))
+        self.dim = dim
+        self.base = base
+        # Match stock GemmaRotaryEmbedding's inv_freq EXACTLY (incl. int64 arange).
+        inv_freq = 1.0 / (base ** (torch.arange(0, dim, 2, dtype=torch.int64).float() / dim))
+        self.register_buffer("inv_freq", inv_freq, persistent=False)
+        # Keep legacy cached cos/sin for the SmolVLA / pi0 path that depends on them.
         freqs = torch.outer(torch.arange(max_seq_len).float(), inv_freq)
         self.register_buffer("cos_cached", torch.cat([freqs.cos(), freqs.cos()], dim=-1))
         self.register_buffer("sin_cached", torch.cat([freqs.sin(), freqs.sin()], dim=-1))
 
     def apply(self, x, position_ids):
-        cos = self.cos_cached[position_ids].unsqueeze(1)
-        sin = self.sin_cached[position_ids].unsqueeze(1)
+        # Compute cos/sin AT RUNTIME via stock's matmul path. Even though
+        # mathematically equivalent to the pre-cached lookup, BLAS GEMM
+        # rounding can differ subtly from outer-product+cos. Day 5 Phase B
+        # parity run-11 showed element-specific divergence in Q post-RoPE
+        # despite local test confirming bit-identical math — suspect runtime
+        # context (numerical precision via stock's matmul-based freq compute)
+        # vs cached lookup explains it.
+        inv_freq_expanded = self.inv_freq[None, :, None].float().expand(position_ids.shape[0], -1, 1)
+        position_ids_expanded = position_ids[:, None, :].float()
+        with torch.autocast(device_type=x.device.type if x.device.type != "mps" else "cpu", enabled=False):
+            freqs = (inv_freq_expanded.float() @ position_ids_expanded.float()).transpose(1, 2)
+            emb = torch.cat((freqs, freqs), dim=-1)
+            cos = emb.cos().to(dtype=x.dtype)
+            sin = emb.sin().to(dtype=x.dtype)
+        cos = cos.unsqueeze(1)
+        sin = sin.unsqueeze(1)
         x1, x2 = x[..., : x.shape[-1] // 2], x[..., x.shape[-1] // 2 :]
         return x * cos + torch.cat((-x2, x1), dim=-1) * sin
 
