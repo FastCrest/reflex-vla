@@ -923,7 +923,11 @@ class Pi05ExpertStackWithPrefix(nn.Module):
         t_emb_raw = _sinusoidal_pos_embedding(timestep, self.expert_hidden)
         t_emb = F.silu(self.time_mlp_out(F.silu(self.time_mlp_in(t_emb_raw))))
 
+        from reflex.models.heads.expert_stack import Pi05ExpertGQALayer as _Pi05Layer
         for i, layer in enumerate(self.layers):
+            # Update debug_layer_id so per-layer captures land at unique keys
+            # (otherwise L0 gets overwritten by every layer's forward).
+            _Pi05Layer.debug_layer_id = i
             x = layer(
                 x, position_ids, t_emb,
                 prefix_k_concat=prefix_k[i],
