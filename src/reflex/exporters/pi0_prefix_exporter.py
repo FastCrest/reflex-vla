@@ -840,6 +840,210 @@ def export_pi0_prefix(
     return result
 
 
+class Pi05ExpertStackWithPrefix(nn.Module):
+    """Pi0.5 expert stack: AdaRMSNorm time-conditioned + per-layer VLM
+    prefix-KV concat for self-attention.
+
+    Mirrors `Pi0ExpertStackWithPrefix` but for pi0.5's specifics:
+
+    - Suffix is **action-only** (chunk_size tokens) — NO state token. State
+      info is encoded in lerobot's lang_tokens via knowledge insulation.
+    - Time embedding feeds AdaRMSNorm per layer (NOT concatenated into
+      suffix sequence like pi0 / SmolVLA).
+    - Final norm is plain RMSNorm with `(1+w)` Gemma convention.
+
+    Inputs to `forward`:
+        noisy_actions: [B, chunk_size, action_dim]
+        timestep:      [B]
+        position_ids:  [B, chunk_size] (absolute, OFFSET by prefix_len)
+        prefix_k:      [L, B, prefix_len, nkv, hd] per-layer, RoPE-applied
+        prefix_v:      [L, B, prefix_len, nkv, hd] per-layer, no RoPE
+        attn_mask:     optional bool [B, 1, chunk_size, prefix_len + chunk_size]
+                       for lerobot's block attention pattern (all suffix
+                       attends prefix bidirectionally; all suffix attends
+                       all other suffix tokens).
+
+    Output:
+        velocity: [B, chunk_size, action_dim]
+    """
+
+    def __init__(
+        self,
+        layers: list,
+        expert_hidden: int,
+        action_dim: int,
+        time_mlp_weights: dict,
+        action_proj_weights: dict,
+        in_proj_weights: dict,
+        final_norm_weight: torch.Tensor | None = None,
+        final_norm_dense_weights: dict | None = None,
+    ):
+        super().__init__()
+        from reflex.decompose import DecomposedAdaRMSNorm, DecomposedRMSNorm
+        self.layers = nn.ModuleList(layers)
+        self.expert_hidden = expert_hidden
+
+        # action_in_proj — same as pi0
+        self.action_in_proj = nn.Linear(action_dim, expert_hidden)
+        self.action_in_proj.weight = nn.Parameter(in_proj_weights["w"])
+        self.action_in_proj.bias = nn.Parameter(in_proj_weights["b"])
+
+        # Time MLP — separate from action (NOT concat-then-MLP like pi0)
+        time_in_dim = time_mlp_weights["in_w"].shape[1]
+        time_out_dim = time_mlp_weights["out_w"].shape[0]
+        self.time_mlp_in = nn.Linear(time_in_dim, time_mlp_weights["in_w"].shape[0])
+        self.time_mlp_in.weight = nn.Parameter(time_mlp_weights["in_w"])
+        self.time_mlp_in.bias = nn.Parameter(time_mlp_weights["in_b"])
+        self.time_mlp_out = nn.Linear(time_mlp_weights["out_w"].shape[1], time_out_dim)
+        self.time_mlp_out.weight = nn.Parameter(time_mlp_weights["out_w"])
+        self.time_mlp_out.bias = nn.Parameter(time_mlp_weights["out_b"])
+
+        self.action_out_proj = nn.Linear(expert_hidden, action_dim)
+        self.action_out_proj.weight = nn.Parameter(action_proj_weights["w"])
+        self.action_out_proj.bias = nn.Parameter(action_proj_weights["b"])
+
+        # Final norm — pi0.5 expert uses AdaRMSNorm (time-conditioned) per
+        # lerobot modeling_pi05.py:524-540 (`compute_final_norms` passes
+        # adarms_cond[1] to models[1].norm). Plain RMSNorm here gives bit-wrong
+        # final output even though all 18 expert layers match bit-identically.
+        if final_norm_dense_weights is not None:
+            self.final_norm = DecomposedAdaRMSNorm(expert_hidden, time_dim=expert_hidden)
+            self.final_norm.dense.weight = nn.Parameter(final_norm_dense_weights["w"])
+            self.final_norm.dense.bias = nn.Parameter(final_norm_dense_weights["b"])
+            self._final_norm_is_adarms = True
+        else:
+            # Legacy pi0 path — plain RMSNorm.
+            assert final_norm_weight is not None
+            self.final_norm = DecomposedRMSNorm(final_norm_weight)
+            self._final_norm_is_adarms = False
+
+    def forward(
+        self,
+        noisy_actions: torch.Tensor,
+        timestep: torch.Tensor,
+        position_ids: torch.Tensor,
+        prefix_k: torch.Tensor,
+        prefix_v: torch.Tensor,
+        attn_mask: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        from reflex.models.heads.expert_stack import _sinusoidal_pos_embedding
+
+        # action_in_proj — NO state token (pi0.5 uses state-in-language)
+        x = self.action_in_proj(noisy_actions)
+
+        # Time embedding: sinusoidal → time_mlp_in → silu → time_mlp_out → silu
+        # Per lerobot pi0.5 modeling_pi05.py:706-710 (note: silu AFTER time_mlp_out too).
+        t_emb_raw = _sinusoidal_pos_embedding(timestep, self.expert_hidden)
+        t_emb = F.silu(self.time_mlp_out(F.silu(self.time_mlp_in(t_emb_raw))))
+
+        from reflex.models.heads.expert_stack import Pi05ExpertGQALayer as _Pi05Layer
+        for i, layer in enumerate(self.layers):
+            _Pi05Layer.debug_layer_id = i
+            x = layer(
+                x, position_ids, t_emb,
+                prefix_k_concat=prefix_k[i],
+                prefix_v_concat=prefix_v[i],
+                attn_mask=attn_mask,
+            )
+
+        # Final norm — AdaRMSNorm path for pi0.5 expert (uses time conditioning).
+        if getattr(self, "_final_norm_is_adarms", False):
+            x = self.final_norm(x, t_emb)
+        else:
+            x = self.final_norm(x)
+        return self.action_out_proj(x)
+
+
+def build_pi05_expert_with_prefix(state_dict: dict[str, torch.Tensor]) -> tuple[Pi05ExpertStackWithPrefix, dict]:
+    """Build pi0.5's expert stack wired for per-layer prefix-KV concat.
+
+    Reuses the existing pi0_exporter.build_pi05_expert_stack to validate
+    keys + extract per-layer weights, then rebuilds with
+    Pi05ExpertStackWithPrefix (prefix-aware Pi05ExpertGQALayer).
+    """
+    from reflex.exporters.pi0_exporter import build_pi05_expert_stack, PI05_ACTION_KEYS, PI0_EXPERT_PREFIX
+    from reflex.models.heads.expert_stack import Pi05ExpertGQALayer
+
+    # pi0.5 expert: SAME dim config as pi0 (num_heads=8, num_kv_heads=1,
+    # head_dim=256) per lerobot modeling_pi05.py:320,329 (gemma_300m and
+    # gemma_2b action_expert variants both use head_dim=256). The old
+    # build_pi05_expert_stack default of head_dim=128 produced wrong
+    # nq=16/nkv=2 split but worked in the non-prefix-concat path because
+    # expert KV wasn't shape-compatible with paligemma's K (cross-attn
+    # only). Prefix-concat path REQUIRES matching paligemma's [B, 1, prefix_len, 256] K.
+    base_stack, meta = build_pi05_expert_stack(state_dict, head_dim=256)
+    expert_hidden = meta["expert_hidden"]
+    action_dim = meta["action_dim"]
+    num_layers = meta["num_layers"]
+    nq = meta["n_q_heads"]
+    nkv = meta["n_kv_heads"]
+    head_dim = 256
+    inter = state_dict[f"{PI0_EXPERT_PREFIX}layers.0.mlp.gate_proj.weight"].shape[0]
+
+    # Build the prefix-aware layers (Pi05ExpertGQALayer = AdaRMSNorm + prefix + gelu + gating)
+    layers: list[Pi05ExpertGQALayer] = []
+    base_prefix = PI0_EXPERT_PREFIX
+    for i in range(num_layers):
+        prefix = f"{base_prefix}layers.{i}"
+        layer = Pi05ExpertGQALayer(expert_hidden, nq, nkv, head_dim, inter, rope_theta=10000.0)
+        layer_sd = {
+            "input_layernorm.dense.weight": state_dict[f"{prefix}.input_layernorm.dense.weight"],
+            "input_layernorm.dense.bias": state_dict[f"{prefix}.input_layernorm.dense.bias"],
+            "post_attention_layernorm.dense.weight": state_dict[f"{prefix}.post_attention_layernorm.dense.weight"],
+            "post_attention_layernorm.dense.bias": state_dict[f"{prefix}.post_attention_layernorm.dense.bias"],
+            "q_proj.weight": state_dict[f"{prefix}.self_attn.q_proj.weight"],
+            "k_proj.weight": state_dict[f"{prefix}.self_attn.k_proj.weight"],
+            "v_proj.weight": state_dict[f"{prefix}.self_attn.v_proj.weight"],
+            "o_proj.weight": state_dict[f"{prefix}.self_attn.o_proj.weight"],
+            "gate_proj.weight": state_dict[f"{prefix}.mlp.gate_proj.weight"],
+            "up_proj.weight": state_dict[f"{prefix}.mlp.up_proj.weight"],
+            "down_proj.weight": state_dict[f"{prefix}.mlp.down_proj.weight"],
+        }
+        layer.load_state_dict(layer_sd, strict=False)
+        layers.append(layer)
+
+    # Final norm — pi0.5 expert uses AdaRMSNorm (time-conditioned),
+    # NOT plain RMSNorm. State dict has `norm.dense.weight` + `norm.dense.bias`.
+    final_norm_dense_w_key = f"{base_prefix}norm.dense.weight"
+    final_norm_dense_b_key = f"{base_prefix}norm.dense.bias"
+    if final_norm_dense_w_key in state_dict:
+        final_norm_dense_weights = {
+            "w": state_dict[final_norm_dense_w_key],
+            "b": state_dict[final_norm_dense_b_key],
+        }
+        final_norm_w = None
+    else:
+        # Fallback: plain RMSNorm (legacy / pi0 path).
+        final_norm_key = f"{base_prefix}norm.weight"
+        final_norm_w_raw = state_dict.get(final_norm_key, torch.zeros(expert_hidden))
+        final_norm_w = final_norm_w_raw + 1.0
+        final_norm_dense_weights = None
+
+    stack = Pi05ExpertStackWithPrefix(
+        layers=layers,
+        expert_hidden=expert_hidden,
+        action_dim=action_dim,
+        time_mlp_weights={
+            "in_w": state_dict[PI05_ACTION_KEYS["t_in_w"]],
+            "in_b": state_dict[PI05_ACTION_KEYS["t_in_b"]],
+            "out_w": state_dict[PI05_ACTION_KEYS["t_out_w"]],
+            "out_b": state_dict[PI05_ACTION_KEYS["t_out_b"]],
+        },
+        action_proj_weights={
+            "w": state_dict[PI05_ACTION_KEYS["out_w"]],
+            "b": state_dict[PI05_ACTION_KEYS["out_b"]],
+        },
+        in_proj_weights={
+            "w": state_dict[PI05_ACTION_KEYS["in_w"]],
+            "b": state_dict[PI05_ACTION_KEYS["in_b"]],
+        },
+        final_norm_weight=final_norm_w,
+        final_norm_dense_weights=final_norm_dense_weights,
+    )
+    stack.eval()
+    return stack, meta
+
+
 # TODO(v0.3): compose with pi0_exporter.build_pi0_expert_stack + flow matching
 # host-side loop to produce end-to-end parity test.
 # TODO(v0.3): write scripts/local_full_diff_pi0.py (analog of
