@@ -945,13 +945,17 @@ def build_pi05_expert_with_prefix(state_dict: dict[str, torch.Tensor]) -> tuple[
     from reflex.exporters.pi0_exporter import build_pi05_expert_stack, PI05_ACTION_KEYS, PI0_EXPERT_PREFIX
     from reflex.models.heads.expert_stack import Pi05ExpertGQALayer
 
-    base_stack, meta = build_pi05_expert_stack(state_dict, head_dim=256)
+    # pi0.5 uses head_dim=128 (default in build_pi05_expert_stack), nq=16, nkv=2 —
+    # different split from pi0 which uses head_dim=256, nq=8, nkv=1. The
+    # prior pi0_exporter has shipped pi0.5 ONNX exports with the 128 split
+    # since 2026-04 — confirmed working in production.
+    base_stack, meta = build_pi05_expert_stack(state_dict, head_dim=128)
     expert_hidden = meta["expert_hidden"]
     action_dim = meta["action_dim"]
     num_layers = meta["num_layers"]
     nq = meta["n_q_heads"]
     nkv = meta["n_kv_heads"]
-    head_dim = 256  # Gemma standard (pi0_prefix_exporter override per 2026-04-17 inspection)
+    head_dim = 128
     inter = state_dict[f"{PI0_EXPERT_PREFIX}layers.0.mlp.gate_proj.weight"].shape[0]
 
     # Build the prefix-aware layers (Pi05ExpertGQALayer = AdaRMSNorm + prefix + gelu + gating)
