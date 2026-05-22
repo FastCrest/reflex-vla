@@ -262,7 +262,7 @@ def test_run_handles_timeout_with_bytes_stderr(monkeypatch):
     result = PreflightSmokeTest.run(timeout_s=10)
     assert not result.passed
     assert result.stderr == "binary err"
-    assert result.output == "binary output"
+    assert result.stdout == "binary output"
 
 
 def test_run_handles_timeout_with_none_outputs(monkeypatch):
@@ -274,7 +274,7 @@ def test_run_handles_timeout_with_none_outputs(monkeypatch):
     result = PreflightSmokeTest.run(timeout_s=10)
     assert not result.passed
     assert result.failure_mode == "osmesa-compile-hang"
-    assert result.output == ""
+    assert result.stdout == ""
     assert result.stderr == ""
 
 
