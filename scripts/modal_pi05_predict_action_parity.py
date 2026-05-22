@@ -144,18 +144,22 @@ def run_parity(
     # ─── 2. Build deterministic input batch ────────────────────────────
     print("\n=== Step 2: Build deterministic input batch ===", flush=True)
     rng = np.random.RandomState(input_seed)
-    img_np = rng.randint(0, 255, (224, 224, 3), dtype=np.uint8)
-    img_t = torch.from_numpy(img_np).permute(2, 0, 1).float() / 255.0
-    img_t = img_t * 2.0 - 1.0
+    # pi0.5_libero expects 256x256 images for image+image2, 224x224 for
+    # empty_camera_0 (the placeholder camera slot). Per the model's
+    # input_features config from PI05Config.
+    img256_np = rng.randint(0, 255, (256, 256, 3), dtype=np.uint8)
+    img256_t = torch.from_numpy(img256_np).permute(2, 0, 1).float() / 255.0
+    img256_t = img256_t * 2.0 - 1.0
+    img224_np = rng.randint(0, 255, (224, 224, 3), dtype=np.uint8)
+    img224_t = torch.from_numpy(img224_np).permute(2, 0, 1).float() / 255.0
+    img224_t = img224_t * 2.0 - 1.0
     # pi0.5_libero uses Franka 8-dim state (vs pi0_base's 14-dim Aloha state).
-    # Specific to the libero finetune. Mismatched state shape hits the
-    # NormalizeProcessor and crashes during preprocess.
     state = torch.from_numpy(rng.randn(8).astype(np.float32) * 0.1)
 
     batch_raw = {
-        "observation.images.base_0_rgb": img_t.unsqueeze(0),
-        "observation.images.left_wrist_0_rgb": img_t.unsqueeze(0),
-        "observation.images.right_wrist_0_rgb": img_t.unsqueeze(0),
+        "observation.images.image": img256_t.unsqueeze(0),
+        "observation.images.image2": img256_t.unsqueeze(0),
+        "observation.images.empty_camera_0": img224_t.unsqueeze(0),
         "observation.state": state.unsqueeze(0),
         "task": ["pick up the red bowl"],
     }
