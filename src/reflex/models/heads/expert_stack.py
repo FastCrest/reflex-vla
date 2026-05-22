@@ -47,13 +47,20 @@ def _sinusoidal_pos_embedding(t, dim, min_p=4e-3, max_p=4.0):
     order instead of [sin, cos]. Both wrong. Time signal to the expert was
     therefore completely mis-phased, making every denoising step operate at
     the wrong "time," which cascaded into flow-matching catastrophic drift.
+
+    Lerobot computes `fraction` / `period` / `scaling_factor` in **float64**
+    (modeling_pi0.py:90-95), then `sin_input` in fp64 (because scaling is
+    fp64), then sin/cos of fp64, finally `.type_as(timestep.dtype)`. Computing
+    in fp32 throughout introduces a tiny per-element drift in time_emb that
+    compounds through 18 AdaRMSNorm layers and shows up in pi0.5 v_t parity.
     """
     assert dim % 2 == 0
-    fraction = torch.linspace(0.0, 1.0, dim // 2, device=t.device, dtype=t.dtype)
+    # Use fp64 for fraction/period/scaling to match lerobot precision exactly.
+    fraction = torch.linspace(0.0, 1.0, dim // 2, device=t.device, dtype=torch.float64)
     period = min_p * (max_p / min_p) ** fraction
-    scaling = (1.0 / period) * 2 * math.pi  # [dim/2]
-    angle = t.unsqueeze(-1) * scaling.unsqueeze(0)  # [B, dim/2]
-    return torch.cat([angle.sin(), angle.cos()], dim=-1)
+    scaling = (1.0 / period) * 2 * math.pi  # [dim/2] in fp64
+    angle = t.unsqueeze(-1).double() * scaling.unsqueeze(0)  # [B, dim/2] in fp64
+    return torch.cat([angle.sin(), angle.cos()], dim=-1).to(t.dtype)
 
 
 class _DecomposedRoPE(nn.Module):
