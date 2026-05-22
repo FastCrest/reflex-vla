@@ -945,17 +945,20 @@ def build_pi05_expert_with_prefix(state_dict: dict[str, torch.Tensor]) -> tuple[
     from reflex.exporters.pi0_exporter import build_pi05_expert_stack, PI05_ACTION_KEYS, PI0_EXPERT_PREFIX
     from reflex.models.heads.expert_stack import Pi05ExpertGQALayer
 
-    # pi0.5 uses head_dim=128 (default in build_pi05_expert_stack), nq=16, nkv=2 —
-    # different split from pi0 which uses head_dim=256, nq=8, nkv=1. The
-    # prior pi0_exporter has shipped pi0.5 ONNX exports with the 128 split
-    # since 2026-04 — confirmed working in production.
-    base_stack, meta = build_pi05_expert_stack(state_dict, head_dim=128)
+    # pi0.5 expert: SAME dim config as pi0 (num_heads=8, num_kv_heads=1,
+    # head_dim=256) per lerobot modeling_pi05.py:320,329 (gemma_300m and
+    # gemma_2b action_expert variants both use head_dim=256). The old
+    # build_pi05_expert_stack default of head_dim=128 produced wrong
+    # nq=16/nkv=2 split but worked in the non-prefix-concat path because
+    # expert KV wasn't shape-compatible with paligemma's K (cross-attn
+    # only). Prefix-concat path REQUIRES matching paligemma's [B, 1, prefix_len, 256] K.
+    base_stack, meta = build_pi05_expert_stack(state_dict, head_dim=256)
     expert_hidden = meta["expert_hidden"]
     action_dim = meta["action_dim"]
     num_layers = meta["num_layers"]
     nq = meta["n_q_heads"]
     nkv = meta["n_kv_heads"]
-    head_dim = 128
+    head_dim = 256
     inter = state_dict[f"{PI0_EXPERT_PREFIX}layers.0.mlp.gate_proj.weight"].shape[0]
 
     # Build the prefix-aware layers (Pi05ExpertGQALayer = AdaRMSNorm + prefix + gelu + gating)
