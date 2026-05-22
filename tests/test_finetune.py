@@ -307,6 +307,6 @@ class TestCliWiring:
         runner = CliRunner()
         result = runner.invoke(cli_app, ["finetune", "--help"])
         assert result.exit_code == 0
-        assert "base" in result.stdout.lower()
-        assert "dataset" in result.stdout.lower()
-        assert "output" in result.stdout.lower()
+        assert "base" in result.output.lower()
+        assert "dataset" in result.output.lower()
+        assert "output" in result.output.lower()
