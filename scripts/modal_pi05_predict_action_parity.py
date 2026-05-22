@@ -322,6 +322,66 @@ def run_parity(
         print(f"  v_t norm: lerobot {v_t_ler.norm():.4f}  mine {v_t_mine.norm():.4f}")
         print(f"  v_t[0, 0, :8]: lerobot {v_t_ler[0, 0, :8]}  mine {v_t_mine[0, 0, :8]}")
 
+        # ─── Layer-0 + sub-module diff (Day 4h methodology) ─────────────
+        print(f"\n  --- Layer-0 + intra-layer-0 sub-module diff ---")
+        captured: dict = {}
+        def make_hook(name):
+            def hook(module, inp, out):
+                captured[name] = out[0] if isinstance(out, tuple) else out
+            return hook
+
+        ler_layers = policy.model.paligemma_with_expert.gemma_expert.model.layers
+        my_layers = vla.vla_head.expert_stack.layers
+        ler_l0 = ler_layers[0]
+        my_l0 = my_layers[0]
+        sub_hooks = [
+            ler_l0.register_forward_hook(make_hook("ler_layer_out")),
+            my_l0.register_forward_hook(make_hook("my_layer_out")),
+            ler_l0.input_layernorm.register_forward_hook(make_hook("ler_input_ln")),
+            my_l0.input_layernorm.register_forward_hook(make_hook("my_input_ln")),
+            ler_l0.self_attn.q_proj.register_forward_hook(make_hook("ler_q_proj")),
+            my_l0.q_proj.register_forward_hook(make_hook("my_q_proj")),
+            ler_l0.self_attn.k_proj.register_forward_hook(make_hook("ler_k_proj")),
+            my_l0.k_proj.register_forward_hook(make_hook("my_k_proj")),
+            ler_l0.self_attn.o_proj.register_forward_hook(make_hook("ler_o_proj")),
+            my_l0.o_proj.register_forward_hook(make_hook("my_o_proj")),
+            ler_l0.post_attention_layernorm.register_forward_hook(make_hook("ler_post_ln")),
+            my_l0.post_attention_layernorm.register_forward_hook(make_hook("my_post_ln")),
+            ler_l0.mlp.gate_proj.register_forward_hook(make_hook("ler_gate")),
+            my_l0.gate_proj.register_forward_hook(make_hook("my_gate")),
+            ler_l0.mlp.up_proj.register_forward_hook(make_hook("ler_up")),
+            my_l0.up_proj.register_forward_hook(make_hook("my_up")),
+            ler_l0.mlp.down_proj.register_forward_hook(make_hook("ler_down")),
+            my_l0.down_proj.register_forward_hook(make_hook("my_down")),
+        ]
+        try:
+            ler_pkv_copy2 = _copy.deepcopy(ler_pkv)
+            policy.model.denoise_step(
+                ler_prefix_pad, ler_pkv_copy2,
+                noise.clone(), torch.tensor([1.0], dtype=torch.float32),
+            )
+            _ = vla.vla_head(
+                noisy_actions=noise.clone(),
+                timestep=torch.tensor([1.0], dtype=torch.float32),
+                position_ids=suffix_position_ids,
+                prefix_k=my_prefix_k, prefix_v=my_prefix_v,
+                attn_mask=suffix_2d,
+            )
+            for name in ["layer_out", "input_ln", "q_proj", "k_proj", "o_proj",
+                          "post_ln", "gate", "up", "down"]:
+                ler_x = captured.get(f"ler_{name}")
+                my_x = captured.get(f"my_{name}")
+                if ler_x is None or my_x is None:
+                    continue
+                if ler_x.shape != my_x.shape:
+                    print(f"  {name}: shape mismatch ler={ler_x.shape} my={my_x.shape}")
+                    continue
+                d = (ler_x.float() - my_x.float()).abs()
+                print(f"  {name}: shape {ler_x.shape}, ler norm {ler_x.norm():.4f}, my norm {my_x.norm():.4f}, diff max {d.max():.4e}, mean {d.mean():.4e}")
+        finally:
+            for h in sub_hooks:
+                h.remove()
+
         del policy
         gc.collect()
     step("intermediate_parity", "pass", "see prints above")
