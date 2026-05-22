@@ -359,6 +359,14 @@ def run_parity(
                 attn_mask=suffix_2d,
             )
             print(f"\n  --- Intra-attention diff (layer 0) ---")
+            # Also print per-layer norms for L0, L8, L17 to see if drift compounds
+            print(f"  Per-layer my captures (q_post_rope norm):")
+            for lid in [0, 4, 8, 12, 17]:
+                key = f"L{lid}_q_post_rope"
+                if key in Pi05ExpertGQALayer.debug_captures:
+                    t = Pi05ExpertGQALayer.debug_captures[key]
+                    print(f"    L{lid}: norm {t.norm():.4f}, [0,0,0,:5]={t[0,0,0,:5]}")
+            print()
             for name, my_key, ler_key in [
                 ("Q_pre_rope_action", "L0_q_pre_rope", None),
                 ("Q_post_rope_action", "L0_q_post_rope", "q"),
