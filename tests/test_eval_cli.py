@@ -92,7 +92,7 @@ def test_eval_rejects_missing_export_dir(tmp_path):
         app, ["eval", str(tmp_path / "does-not-exist")],
     )
     assert result.exit_code == 1
-    assert "not found" in result.stdout.lower()
+    assert "not found" in result.output.lower()
 
 
 def test_eval_rejects_unknown_suite(fake_export):
@@ -100,7 +100,7 @@ def test_eval_rejects_unknown_suite(fake_export):
         app, ["eval", str(fake_export), "--suite", "fictional"],
     )
     assert result.exit_code == 2
-    assert "Unknown suite" in result.stdout
+    assert "Unknown suite" in result.output
 
 
 def test_eval_rejects_unknown_runtime(fake_export):
@@ -108,7 +108,7 @@ def test_eval_rejects_unknown_runtime(fake_export):
         app, ["eval", str(fake_export), "--runtime", "kubernetes"],
     )
     assert result.exit_code == 2
-    assert "Unknown runtime" in result.stdout
+    assert "Unknown runtime" in result.output
 
 
 def test_eval_rejects_zero_episodes(fake_export):
@@ -116,7 +116,7 @@ def test_eval_rejects_zero_episodes(fake_export):
         app, ["eval", str(fake_export), "--num-episodes", "0"],
     )
     assert result.exit_code == 2
-    assert "Invalid configuration" in result.stdout
+    assert "Invalid configuration" in result.output
 
 
 def test_eval_rejects_zero_max_parallel(fake_export):
@@ -124,7 +124,7 @@ def test_eval_rejects_zero_max_parallel(fake_export):
         app, ["eval", str(fake_export), "--max-parallel", "0"],
     )
     assert result.exit_code == 2
-    assert "Invalid configuration" in result.stdout
+    assert "Invalid configuration" in result.output
 
 
 # ---------------------------------------------------------------------------
@@ -139,11 +139,11 @@ def test_eval_prints_banner_with_inputs(fake_export, stub_preflight_pass, stub_m
               "--seed", "42", "--tasks", "libero_spatial,libero_object"],
     )
     # Stub runners produce all-adapter-error → exit 5; that's expected Day 3
-    assert "Reflex Eval" in result.stdout
-    assert "libero_spatial" in result.stdout
-    assert "libero_object" in result.stdout
-    assert "Seed:" in result.stdout
-    assert "42" in result.stdout
+    assert "Reflex Eval" in result.output
+    assert "libero_spatial" in result.output
+    assert "libero_object" in result.output
+    assert "Seed:" in result.output
+    assert "42" in result.output
 
 
 def test_eval_banner_marks_video_when_set(fake_export, stub_preflight_pass, stub_modal_runner):
@@ -152,8 +152,8 @@ def test_eval_banner_marks_video_when_set(fake_export, stub_preflight_pass, stub
     result = runner.invoke(
         app, ["eval", str(fake_export), "--video"],
     )
-    assert "Video:" in result.stdout
-    assert "Phase 2" in result.stdout
+    assert "Video:" in result.output
+    assert "Phase 2" in result.output
 
 
 # ---------------------------------------------------------------------------
@@ -179,7 +179,7 @@ def test_cost_preview_exits_clean_without_running_preflight(fake_export, monkeyp
         app, ["eval", str(fake_export), "--cost-preview", "--num-episodes", "5"],
     )
     assert result.exit_code == 0
-    assert "Cost preview" in result.stdout
+    assert "Cost preview" in result.output
     assert called["n"] == 0  # preflight skipped
 
 
@@ -191,8 +191,8 @@ def test_cost_preview_shows_dollar_total(fake_export):
     )
     assert result.exit_code == 0
     # 3 tasks × (10 × $0.025 + $0.10) = $1.05; surfaces as "$1.05"
-    assert "$1.05" in result.stdout or "$1.0" in result.stdout
-    assert "Total estimate" in result.stdout
+    assert "$1.05" in result.output or "$1.0" in result.output
+    assert "Total estimate" in result.output
 
 
 def test_cost_preview_uses_default_tasks_when_unspecified(fake_export):
@@ -202,9 +202,9 @@ def test_cost_preview_uses_default_tasks_when_unspecified(fake_export):
     )
     assert result.exit_code == 0
     # 4 tasks × (5 × $0.025 + $0.10) = $0.90
-    assert "$0.90" in result.stdout or "$0.9" in result.stdout
+    assert "$0.90" in result.output or "$0.9" in result.output
     # Banner echoes 4 tasks
-    assert "4 tasks" in result.stdout
+    assert "4 tasks" in result.output
 
 
 def test_cost_preview_local_runtime_is_zero(fake_export):
@@ -213,8 +213,8 @@ def test_cost_preview_local_runtime_is_zero(fake_export):
               "--runtime", "local", "--num-episodes", "100"],
     )
     assert result.exit_code == 0
-    assert "$0.00" in result.stdout
-    assert "Local" in result.stdout
+    assert "$0.00" in result.output
+    assert "Local" in result.output
 
 
 def test_cost_preview_warns_above_guardrail(fake_export):
@@ -226,7 +226,7 @@ def test_cost_preview_warns_above_guardrail(fake_export):
     )
     assert result.exit_code == 0
     # 20 tasks × (1000 × $0.025 + $0.10) = 20 × $25.10 = $502.00
-    assert "guardrail" in result.stdout.lower() or "$50" in result.stdout
+    assert "guardrail" in result.output.lower() or "$50" in result.output
 
 
 # ---------------------------------------------------------------------------
@@ -237,15 +237,15 @@ def test_cost_preview_warns_above_guardrail(fake_export):
 def test_eval_aborts_on_preflight_failure(fake_export, stub_preflight_fail):
     result = runner.invoke(app, ["eval", str(fake_export)])
     assert result.exit_code == 4
-    assert "Pre-flight FAILED" in result.stdout
-    assert "dep-version-conflict" in result.stdout
-    assert "robosuite==1.4.1" in result.stdout  # remediation surfaced
+    assert "Pre-flight FAILED" in result.output
+    assert "dep-version-conflict" in result.output
+    assert "robosuite==1.4.1" in result.output  # remediation surfaced
 
 
 def test_eval_continues_on_preflight_pass(fake_export, stub_preflight_pass, stub_modal_runner):
     result = runner.invoke(app, ["eval", str(fake_export)])
     # Pre-flight OK + Day 3 stub runners → exit 5 (all adapter_error)
-    assert "Pre-flight OK" in result.stdout
+    assert "Pre-flight OK" in result.output
     assert result.exit_code == 5
 
 
@@ -281,8 +281,8 @@ def test_day3_stub_runner_exits_5_on_all_adapter_error(fake_export, stub_preflig
               "--tasks", "libero_spatial", "--num-episodes", "2"],
     )
     assert result.exit_code == 5
-    assert "adapter_error" in result.stdout.lower()
-    assert "Day" in result.stdout  # mentions deferral
+    assert "adapter_error" in result.output.lower()
+    assert "Day" in result.output  # mentions deferral
 
 
 def test_day3_emits_per_task_table(fake_export, stub_preflight_pass, stub_modal_runner):
@@ -291,9 +291,9 @@ def test_day3_emits_per_task_table(fake_export, stub_preflight_pass, stub_modal_
               "--tasks", "libero_spatial,libero_object", "--num-episodes", "1"],
     )
     # Per-task table should render even on all-adapter-error
-    assert "Per-task results" in result.stdout
-    assert "libero_spatial" in result.stdout
-    assert "libero_object" in result.stdout
+    assert "Per-task results" in result.output
+    assert "libero_spatial" in result.output
+    assert "libero_object" in result.output
 
 
 def test_day3_creates_output_directory(fake_export, stub_preflight_pass, stub_modal_runner, tmp_path):
@@ -339,8 +339,8 @@ def test_tasks_csv_strips_whitespace(fake_export, stub_preflight_pass, stub_moda
               "--tasks", " libero_spatial , libero_object ",
               "--num-episodes", "1"],
     )
-    assert "libero_spatial" in result.stdout
-    assert "libero_object" in result.stdout
+    assert "libero_spatial" in result.output
+    assert "libero_object" in result.output
 
 
 def test_tasks_csv_drops_empty_entries(fake_export, stub_preflight_pass, stub_modal_runner):
@@ -350,8 +350,8 @@ def test_tasks_csv_drops_empty_entries(fake_export, stub_preflight_pass, stub_mo
               "--num-episodes", "1"],
     )
     # Both real tasks present in per-task table; no empty rows
-    assert "libero_spatial" in result.stdout
-    assert "libero_object" in result.stdout
+    assert "libero_spatial" in result.output
+    assert "libero_object" in result.output
 
 
 # ---------------------------------------------------------------------------

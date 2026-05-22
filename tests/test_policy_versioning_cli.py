@@ -47,7 +47,7 @@ def test_policy_a_alone_fails(fake_export, fake_export_b):
         app, ["serve", str(fake_export), "--policy-a", str(fake_export)],
     )
     assert result.exit_code == 1
-    assert "must be set together" in result.stdout
+    assert "must be set together" in result.output
 
 
 def test_policy_b_alone_fails(fake_export, fake_export_b):
@@ -56,7 +56,7 @@ def test_policy_b_alone_fails(fake_export, fake_export_b):
         app, ["serve", str(fake_export), "--policy-b", str(fake_export_b)],
     )
     assert result.exit_code == 1
-    assert "must be set together" in result.stdout
+    assert "must be set together" in result.output
 
 
 def test_2policy_mutually_exclusive_with_shadow(fake_export, fake_export_b, tmp_path):
@@ -72,7 +72,7 @@ def test_2policy_mutually_exclusive_with_shadow(fake_export, fake_export_b, tmp_
         ],
     )
     assert result.exit_code == 1
-    assert "mutually exclusive" in result.stdout
+    assert "mutually exclusive" in result.output
 
 
 # ---------------------------------------------------------------------------
@@ -90,7 +90,7 @@ def test_2policy_requires_no_rtc(fake_export, fake_export_b):
         ],
     )
     assert result.exit_code == 1
-    assert "--no-rtc" in result.stdout
+    assert "--no-rtc" in result.output
 
 
 # ---------------------------------------------------------------------------
@@ -109,7 +109,7 @@ def test_split_negative_rejected(fake_export, fake_export_b):
         ],
     )
     assert result.exit_code == 1
-    assert "split_a_percent" in result.stdout
+    assert "split_a_percent" in result.output
 
 
 def test_split_over_hundred_rejected(fake_export, fake_export_b):
@@ -123,7 +123,7 @@ def test_split_over_hundred_rejected(fake_export, fake_export_b):
         ],
     )
     assert result.exit_code == 1
-    assert "split_a_percent" in result.stdout
+    assert "split_a_percent" in result.output
 
 
 # ---------------------------------------------------------------------------
@@ -141,8 +141,8 @@ def test_missing_policy_a_path_rejected(fake_export, fake_export_b, tmp_path):
         ],
     )
     assert result.exit_code == 1
-    assert "--policy-a" in result.stdout
-    assert "not found" in result.stdout
+    assert "--policy-a" in result.output
+    assert "not found" in result.output
 
 
 def test_missing_policy_b_path_rejected(fake_export, fake_export_b, tmp_path):
@@ -155,8 +155,8 @@ def test_missing_policy_b_path_rejected(fake_export, fake_export_b, tmp_path):
         ],
     )
     assert result.exit_code == 1
-    assert "--policy-b" in result.stdout
-    assert "not found" in result.stdout
+    assert "--policy-b" in result.output
+    assert "not found" in result.output
 
 
 # ---------------------------------------------------------------------------
@@ -185,8 +185,8 @@ def test_shadow_policy_logs_phase15_warning(fake_export, tmp_path, monkeypatch):
         ],
     )
     # The warning text should appear before SystemExit takes us out
-    assert "shadow-policy" in result.stdout.lower()
-    assert "phase 1.5" in result.stdout.lower() or "inert" in result.stdout.lower()
+    assert "shadow-policy" in result.output.lower()
+    assert "phase 1.5" in result.output.lower() or "inert" in result.output.lower()
 
 
 # ---------------------------------------------------------------------------
@@ -215,5 +215,5 @@ def test_2policy_valid_combo_surfaces_active_banner(fake_export, fake_export_b, 
             "--no-rtc",
         ],
     )
-    assert "2-policy mode active" in result.stdout
-    assert "--no-rtc enforced" in result.stdout
+    assert "2-policy mode active" in result.output
+    assert "--no-rtc enforced" in result.output

@@ -177,50 +177,50 @@ def cli_app():
 class TestReflexGoCli:
     def test_visible_in_top_level_help(self, runner, cli_app):
         result = runner.invoke(cli_app, ["--help"])
-        assert "go" in result.stdout
+        assert "go" in result.output
 
     def test_help_describes_pipeline(self, runner, cli_app):
         result = runner.invoke(cli_app, ["go", "--help"])
         assert result.exit_code == 0
-        assert "probe" in result.stdout.lower() or "Probe" in result.stdout
-        assert "--model" in result.stdout
-        assert "--embodiment" in result.stdout
-        assert "--device-class" in result.stdout
-        assert "--dry-run" in result.stdout
+        assert "probe" in result.output.lower() or "Probe" in result.output
+        assert "--model" in result.output
+        assert "--embodiment" in result.output
+        assert "--device-class" in result.output
+        assert "--dry-run" in result.output
 
     def test_missing_model_exits_2(self, runner, cli_app):
         result = runner.invoke(cli_app, ["go"])
         assert result.exit_code == 2
-        assert "--model is required" in result.stdout
+        assert "--model is required" in result.output
 
     def test_unknown_device_class_exits_2(self, runner, cli_app):
         result = runner.invoke(cli_app, ["go", "--model", "pi05-libero", "--device-class", "bogus"])
         assert result.exit_code == 2
-        assert "--device-class" in result.stdout
+        assert "--device-class" in result.output
 
     def test_dry_run_resolves_without_pulling(self, runner, cli_app):
         result = runner.invoke(cli_app, [
             "go", "--model", "pi05-libero", "--device-class", "a10g", "--dry-run",
         ])
-        assert result.exit_code == 0, result.stdout
-        assert "DRY RUN" in result.stdout
-        assert "pi05-libero" in result.stdout
-        assert "a10g" in result.stdout
+        assert result.exit_code == 0, result.output
+        assert "DRY RUN" in result.output
+        assert "pi05-libero" in result.output
+        assert "a10g" in result.output
 
     def test_dry_run_with_family_resolves(self, runner, cli_app):
         result = runner.invoke(cli_app, [
             "go", "--model", "smolvla", "--device-class", "orin_nano", "--dry-run",
         ])
-        assert result.exit_code == 0, result.stdout
-        assert "smolvla" in result.stdout
-        assert "DRY RUN" in result.stdout
+        assert result.exit_code == 0, result.output
+        assert "smolvla" in result.output
+        assert "DRY RUN" in result.output
 
     def test_dry_run_unknown_model_exits_2(self, runner, cli_app):
         result = runner.invoke(cli_app, [
             "go", "--model", "totally-unknown-model", "--device-class", "a10g", "--dry-run",
         ])
         assert result.exit_code == 2
-        assert "No registry entry" in result.stdout or "Unknown" in result.stdout
+        assert "No registry entry" in result.output or "Unknown" in result.output
 
     def test_pull_then_export_then_serve_for_requires_export_model(self, runner, cli_app, tmp_path, monkeypatch):
         # Empty target dir → snapshot_download runs.
@@ -254,8 +254,8 @@ class TestReflexGoCli:
         mock_dl.assert_called_once()
         assert mock_dl.call_args.kwargs["repo_id"] == "lerobot/smolvla_base"
         mock_export.assert_called_once()
-        assert "exporting:" in result.stdout
-        assert "export complete" in result.stdout
+        assert "exporting:" in result.output
+        assert "export complete" in result.output
 
     def test_cache_hit_skips_pull(self, runner, cli_app, tmp_path, monkeypatch):
         target = tmp_path / "cached"
@@ -277,7 +277,7 @@ class TestReflexGoCli:
                 "--device-class", "a10g",
                 "--target-dir", str(target),
             ])
-        assert "cache hit" in result.stdout
+        assert "cache hit" in result.output
         mock_dl.assert_not_called()
 
     def test_export_dep_missing_errors_with_monolithic_install_hint(self, runner, cli_app, tmp_path, monkeypatch):
@@ -298,6 +298,6 @@ class TestReflexGoCli:
                 "--device-class", "a10g",
                 "--target-dir", str(target),
             ])
-        assert result.exit_code == 2, result.stdout
-        assert "monolithic" in result.stdout
-        assert "pip install" in result.stdout
+        assert result.exit_code == 2, result.output
+        assert "monolithic" in result.output
+        assert "pip install" in result.output

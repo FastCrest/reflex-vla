@@ -47,9 +47,9 @@ class TestDistillCLI:
         app = self._get_app()
         result = runner.invoke(app, ["distill", "--help"])
         assert result.exit_code == 0
-        assert "--teacher-export" in result.stdout
-        assert "--libero-gate-pp" in result.stdout
-        assert "SnapFlow" in result.stdout
+        assert "--teacher-export" in result.output
+        assert "--libero-gate-pp" in result.output
+        assert "SnapFlow" in result.output
 
     def test_dry_run_exits_without_training(self, tmp_path):
         """With --dry-run the CLI should reach preflight and bail before
@@ -77,7 +77,7 @@ class TestDistillCLI:
                 ],
             )
         # Exit 0 on successful dry run; non-zero if preflight mocking missed.
-        assert result.exit_code == 0, result.stdout
+        assert result.exit_code == 0, result.output
 
 
 # ---------------------------------------------------------------------------
