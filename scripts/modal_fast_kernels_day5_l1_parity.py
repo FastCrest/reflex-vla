@@ -39,8 +39,12 @@ _BRANCH = "lift/5-day1-2-vendor-triton-kernels"
 
 
 image = (
-    modal.Image.debian_slim(python_version="3.12")
+    modal.Image.from_registry(
+        "nvidia/cuda:12.4.0-devel-ubuntu22.04",
+        add_python="3.12",
+    )
     .apt_install("git", "ninja-build")
+    .env({"CUDA_HOME": "/usr/local/cuda"})
     .pip_install(
         "safetensors>=0.4.0",
         "huggingface_hub",
