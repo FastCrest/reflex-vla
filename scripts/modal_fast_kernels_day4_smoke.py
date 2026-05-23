@@ -43,7 +43,7 @@ image = (
         "nvidia/cuda:12.4.0-devel-ubuntu22.04",
         add_python="3.12",
     )
-    .apt_install("git", "ninja-build")
+    .apt_install("git", "ninja-build", "clang", "build-essential")
     .env({"CUDA_HOME": "/usr/local/cuda"})
     .pip_install(
         "safetensors>=0.4.0",
