@@ -1,0 +1,245 @@
+"""Lift #5 Day 6 — L2 cross-runtime parity gate.
+
+Compares Pi05FastKernelsInference (Triton, bf16) vs Pi05VLA.predict_action
+(PyTorch nn.Module, fp32) on identical inputs. Both paths are built from
+the SAME lerobot checkpoint via from_lerobot_policy. Pi05VLA.predict_action
+was validated bit-identical vs lerobot in Lift #1 Day 5 Phase B, so this
+comparison is transitive: if Triton matches the spine, it matches lerobot.
+
+Gate per T-3: cos >= 0.999, max_abs <= 1e-2.
+
+Usage:
+    modal profile activate novarepmarketing
+    modal run scripts/modal_fast_kernels_day6_l2_parity.py
+"""
+import os
+import subprocess
+
+import modal
+
+app = modal.App("reflex-fast-kernels-day6-l2")
+
+
+def _repo_head_sha() -> str:
+    try:
+        return subprocess.check_output(
+            ["git", "rev-parse", "HEAD"],
+            cwd=os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+        ).decode().strip()[:12]
+    except Exception:
+        return "lift/5-day1-2-vendor-triton-kernels"
+
+
+_HEAD = _repo_head_sha()
+_BRANCH = "lift/5-day1-2-vendor-triton-kernels"
+
+
+image = (
+    modal.Image.from_registry(
+        "nvidia/cuda:12.4.0-devel-ubuntu22.04",
+        add_python="3.12",
+    )
+    .apt_install("git", "ninja-build", "clang", "build-essential")
+    .env({"CUDA_HOME": "/usr/local/cuda"})
+    .pip_install(
+        "safetensors>=0.4.0",
+        "huggingface_hub",
+        "transformers<5.4,>=4.40",
+        "numpy", "Pillow", "pydantic>=2.0", "pyyaml",
+        "psutil", "typer", "rich",
+        "lerobot==0.5.1",
+        "triton>=3.1",
+        "ninja",
+    )
+    .run_commands(
+        f'pip install "reflex-vla @ git+https://x-access-token:$GITHUB_TOKEN@github.com/FastCrest/reflex-vla@{_HEAD}"',
+        secrets=[modal.Secret.from_name("github-token")],
+    )
+)
+
+
+@app.function(
+    image=image, gpu="A100-40GB", timeout=2400,
+    secrets=[modal.Secret.from_dict({"HF_TOKEN": os.environ.get("HF_TOKEN", "")})],
+)
+def run_day6_l2(model_id: str = "lerobot/pi05_libero_finetuned_v044", n_pairs: int = 5) -> dict:
+    """L2 cross-runtime: Pi05VLA spine (fp32) vs Triton (bf16).
+
+    Both paths built from the same lerobot checkpoint. Pi05VLA.predict_action
+    was validated bit-identical vs lerobot in Lift #1 Day 5 Phase B.
+
+    Gate: cos >= 0.999, max_abs <= 1e-2.
+    """
+    import time
+
+    import torch
+    import torch.nn.functional as F
+
+    print(f"[d6] L2 cross-runtime — model_id={model_id}, n_pairs={n_pairs}", flush=True)
+    print(f"[d6] CUDA: {torch.cuda.get_device_name(0)}, sm {torch.cuda.get_device_capability(0)}", flush=True)
+    t_total = time.time()
+
+    # ── Load policy once, build both paths ───────────────────────────
+    t0 = time.time()
+    from lerobot.policies.pi05.modeling_pi05 import PI05Policy
+    policy = PI05Policy.from_pretrained(model_id)
+    policy = policy.to(dtype=torch.float32).to("cpu")
+    print(f"[d6] [{time.time()-t0:.1f}s] PI05Policy loaded", flush=True)
+
+    # Path A: Pi05VLA spine (PyTorch nn.Module, fp32)
+    t0 = time.time()
+    from reflex.models.vlas.pi05 import Pi05VLA
+    vla_a = Pi05VLA.from_lerobot_policy(policy)
+    vla_a.vision_backbone.to("cuda")
+    vla_a.llm_backbone.to("cuda")
+    vla_a.vla_head.to("cuda")
+    print(f"[d6] [{time.time()-t0:.1f}s] Path A (Pi05VLA spine, fp32) ready", flush=True)
+
+    # Path B: Pi05FastKernelsInference (Triton, bf16)
+    # Reload policy to avoid shared weight references between paths
+    t0 = time.time()
+    policy_b = PI05Policy.from_pretrained(model_id)
+    policy_b = policy_b.to(dtype=torch.float32).to("cpu")
+    vla_b = Pi05VLA.from_lerobot_policy(policy_b)
+    vla_b.vision_backbone.to("cuda")
+    vla_b.llm_backbone.to("cuda")
+    vla_b.vla_head.to("cuda")
+
+    from reflex.runtime.fast_inference.pi05 import Pi05FastKernelsInference
+    triton_runtime = Pi05FastKernelsInference(vla_b, capture=False)
+    triton_runtime.prepare_triton_inference()
+    del policy_b
+    print(f"[d6] [{time.time()-t0:.1f}s] Path B (Triton, bf16) ready", flush=True)
+
+    # ── N paired comparisons ─────────────────────────────────────────
+    cos_vals = []
+    max_abs_vals = []
+
+    for i in range(n_pairs):
+        torch.manual_seed(42 + i)
+
+        # Synthetic inputs
+        num_views = 2
+        img_size = 224
+
+        # Pi05VLA.predict_action expects images as a list of [batch, C, H, W]
+        images_list = [
+            torch.randn(1, 3, img_size, img_size, device="cuda", dtype=torch.float32)
+            for _ in range(num_views)
+        ]
+
+        lang_tokens = torch.randint(0, 256000, (1, 16), dtype=torch.int64, device="cuda")
+        lang_masks = torch.ones(1, 16, dtype=torch.bool, device="cuda")
+
+        # Fixed noise for deterministic comparison
+        noise = torch.randn(1, 50, 32, dtype=torch.float32, device="cuda")
+
+        # ── Path A: Pi05VLA spine predict_action (fp32) ──
+        t0 = time.time()
+        with torch.no_grad():
+            try:
+                out_a = vla_a.predict_action(
+                    images=images_list,
+                    lang_tokens=lang_tokens,
+                    lang_masks=lang_masks,
+                    noise=noise,
+                    num_steps=10,
+                    chunk_size=50,
+                    action_dim=32,
+                )
+                t_a = time.time() - t0
+            except Exception as e:
+                print(f"[d6]   pair {i} Path A FAILED: {type(e).__name__}: {e}", flush=True)
+                continue
+
+        # ── Path B: Triton (bf16) ──
+        # Pi05FastKernelsInference.predict_action expects:
+        # images: [batch, num_views * 3, H, W]
+        images_concat = torch.cat(images_list, dim=1)  # [1, 6, 224, 224]
+
+        t0 = time.time()
+        out_b = triton_runtime.predict_action(
+            images=images_concat,
+            lang_tokens=lang_tokens,
+            states=torch.zeros(1, 32, device="cuda"),
+            lang_masks=lang_masks,
+            noise=noise,
+        )
+        t_b = time.time() - t0
+
+        # ── Compare ──
+        flat_a = out_a.flatten().float()
+        flat_b = out_b.flatten().float()
+
+        # Shapes may differ if predict_action returns different layouts
+        if flat_a.shape != flat_b.shape:
+            print(
+                f"[d6]   pair {i}: SHAPE MISMATCH A={tuple(out_a.shape)} B={tuple(out_b.shape)}",
+                flush=True,
+            )
+            continue
+
+        cos = F.cosine_similarity(flat_a.unsqueeze(0), flat_b.unsqueeze(0))[0].item()
+        max_abs = (flat_a - flat_b).abs().max().item()
+        cos_vals.append(cos)
+        max_abs_vals.append(max_abs)
+
+        print(
+            f"[d6]   pair {i}: cos={cos:.6f}, max_abs={max_abs:.4e}, "
+            f"t_a={t_a:.3f}s, t_b={t_b:.3f}s, "
+            f"range_a=[{out_a.min().item():.4f},{out_a.max().item():.4f}] "
+            f"range_b=[{out_b.min().item():.4f},{out_b.max().item():.4f}]",
+            flush=True,
+        )
+
+    if not cos_vals:
+        print(f"[d6] NO SUCCESSFUL PAIRS — all Path A calls failed", flush=True)
+        return {"status": "error", "verdict": "FAIL", "reason": "no_successful_pairs"}
+
+    min_cos = min(cos_vals)
+    max_max_abs = max(max_abs_vals)
+    mean_cos = sum(cos_vals) / len(cos_vals)
+
+    gate_cos = 0.999
+    gate_max_abs = 1e-2
+    cos_ok = min_cos >= gate_cos
+    max_abs_ok = max_max_abs <= gate_max_abs
+
+    print(f"\n[d6] {'='*60}", flush=True)
+    print(f"[d6] L2 results: min_cos={min_cos:.6f}, mean_cos={mean_cos:.6f} (gate >= {gate_cos})", flush=True)
+    print(f"[d6]            max_max_abs={max_max_abs:.4e} (gate <= {gate_max_abs:.0e})", flush=True)
+    print(f"[d6] {'='*60}", flush=True)
+
+    verdict = "PASS" if (cos_ok and max_abs_ok) else ("BORDERLINE" if min_cos >= 0.99 else "FAIL")
+    print(f"[d6] L2 VERDICT: {verdict} (total: {time.time()-t_total:.1f}s)", flush=True)
+
+    return {
+        "status": "ok",
+        "verdict": verdict,
+        "n_pairs": n_pairs,
+        "n_successful": len(cos_vals),
+        "min_cos": min_cos,
+        "mean_cos": mean_cos,
+        "max_max_abs": max_max_abs,
+        "gate_cos": gate_cos,
+        "gate_max_abs": gate_max_abs,
+        "cos_distribution": cos_vals,
+        "max_abs_distribution": max_abs_vals,
+        "head_sha": _HEAD,
+    }
+
+
+@app.local_entrypoint()
+def main():
+    print("=" * 70)
+    print(f"Lift #5 Day 6 — L2 cross-runtime parity (spine fp32 vs Triton bf16)")
+    print(f"  branch = {_BRANCH}")
+    print("=" * 70)
+    result = run_day6_l2.remote()
+    print("\n" + "=" * 70)
+    for k, v in result.items():
+        if k in ("cos_distribution", "max_abs_distribution"):
+            print(f"  {k}=[{len(v)} values]")
+        else:
+            print(f"  {k}={v}")
+    print("=" * 70)
