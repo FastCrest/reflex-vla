@@ -137,6 +137,8 @@ def run_rss_benchmark(model_id: str = "lerobot/pi05_libero_finetuned_v044"):
 
     # ─── PATH B: inference-only-weights (flat dict + drop module) ─
     print("\n[rss] PATH B: inference-only-weights (flat dict, no nn.Module residence)")
+    t0 = time.time()
+    policy = _load_pi05_policy()  # PATH A's policy was freed; reload for B
     vla_b = Pi05VLA.from_lerobot_policy(policy)
     rss_after_b_module = _rss_mb()
     print(f"[rss]   built nn.Module (transient) in {time.time()-t0:.1f}s, RSS={rss_after_b_module:.1f} MB")
