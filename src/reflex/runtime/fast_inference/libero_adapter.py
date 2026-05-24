@@ -70,10 +70,16 @@ class TritonLIBEROAdapter:
         vla.llm_backbone.to("cuda")
         vla.vla_head.to("cuda")
 
-        runtime = Pi05FastKernelsInference(vla, capture=capture)
+        # Detect num_views from the policy config's image keys.
+        cfg = policy.config
+        image_keys = [k for k in cfg.input_features if "image" in k.lower()]
+        num_views = max(len(image_keys), 2)  # at least 2; pi0.5 typically 3
+
+        runtime = Pi05FastKernelsInference(
+            vla, capture=capture, num_views=num_views,
+        )
         runtime.prepare_triton_inference()
 
-        cfg = policy.config
         return cls(
             triton_runtime=runtime,
             policy=policy,
