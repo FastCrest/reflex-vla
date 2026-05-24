@@ -133,8 +133,11 @@ def run_l3_diagnostic(
     # ── Load policy + build Triton adapter ────────────────────────────
     t0 = time.time()
     from lerobot.policies.pi05.modeling_pi05 import PI05Policy
+    # Keep policy on CPU — only needed for _preprocess_images + preprocessor.
+    # The Triton adapter handles CUDA via its own VLA. Loading both to CUDA
+    # OOMs on A100-40GB (~26 GB each = 52 GB > 40 GB).
     policy = PI05Policy.from_pretrained(model_id)
-    policy = policy.to(dtype=torch.float32).to("cuda")
+    policy = policy.to(dtype=torch.float32).cpu()
     policy.eval()
     print(f"[l3-diag] [{time.time()-t0:.1f}s] PI05Policy loaded", flush=True)
 

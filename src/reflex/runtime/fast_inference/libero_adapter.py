@@ -111,8 +111,18 @@ class TritonLIBEROAdapter:
             OBS_LANGUAGE_TOKENS,
         )
 
-        # Extract images + masks via the policy's own preprocessor
-        images, img_masks = self._policy._preprocess_images(batch_pp)
+        # Extract images + masks via the policy's own preprocessor.
+        # Policy may be on CPU (to avoid OOM on A100-40GB when both the
+        # reference policy + Triton VLA are loaded); move batch tensors
+        # to the policy's device for preprocessing, then back to CUDA.
+        policy_device = next(self._policy.parameters()).device
+        batch_for_pp = {
+            k: (v.to(policy_device) if isinstance(v, torch.Tensor) else v)
+            for k, v in batch_pp.items()
+        }
+        images, img_masks = self._policy._preprocess_images(batch_for_pp)
+        # Move images back to CUDA for the Triton runtime
+        images = [img.to("cuda") for img in images]
         lang_tokens = batch_pp[OBS_LANGUAGE_TOKENS]
         lang_masks = batch_pp[OBS_LANGUAGE_ATTENTION_MASK]
 
