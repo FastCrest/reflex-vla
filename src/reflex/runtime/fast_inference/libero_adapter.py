@@ -77,6 +77,7 @@ class TritonLIBEROAdapter:
 
         runtime = Pi05FastKernelsInference(
             vla, capture=capture, num_views=num_views,
+            triton_max_prompt_len=128,  # LIBERO task descriptions tokenize to 50-60 tokens; 48 is too small
         )
         runtime.prepare_triton_inference()
 
