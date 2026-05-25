@@ -164,18 +164,17 @@ REGISTRY: tuple[ModelEntry, ...] = (
     # ──────────────────────────────────────────────────────────────────────
     ModelEntry(
         model_id="pi05-libero10-fluxvla",
-        hf_repo="limxdynamics/FluxVLAEngine",
+        hf_repo="Rylinjames/pi05-libero10-finetune-v1",
         family="pi05",
         action_dim=7,
-        size_mb=14000,
+        size_mb=7200,
         supported_embodiments=("franka",),
         supported_devices=("a10g", "a100", "h100", "h200"),
         benchmarks=(),
         requires_export=True,
         description="FluxVLA's pi0.5 finetuned on LIBERO-10 (BS=64, 24 epochs). "
                     "Published 97.85% average success. Apache-2.0 from LimX Dynamics. "
-                    "Use `reflex export pi05-libero10-fluxvla` after pull. "
-                    "Weights at pi05_paligemma_libero_10_full_finetune_bs64/ subdirectory.",
+                    "Republished with attribution from limxdynamics/FluxVLAEngine.",
         license="apache-2.0",
         hf_revision=None,
     ),
