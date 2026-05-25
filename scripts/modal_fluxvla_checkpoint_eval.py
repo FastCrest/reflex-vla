@@ -88,9 +88,7 @@ _BUILD_BUST = _build_bust()
 # Pinned FluxVLA HF reference. If they update upstream, we re-pin deliberately.
 FLUXVLA_HF_REPO = "limxdynamics/FluxVLAEngine"
 FLUXVLA_SUBDIR = "pi05_paligemma_libero_10_full_finetune_bs64"
-# Specific checkpoint file inside the subdir, per FluxVLA's README documentation:
-# https://github.com/FluxVLA/FluxVLA/blob/main/README.md (search for "step-028548")
-FLUXVLA_CHECKPOINT_FILE = "step-028548-epoch-18-loss=0.0111.safetensors"
+FLUXVLA_CHECKPOINT_FILE = "step-038064-epoch-24-loss=0.0170.safetensors"
 
 # FluxVLA's published numbers for verification (their README table, 2026-04-08+):
 FLUXVLA_PUBLISHED = {
@@ -289,24 +287,31 @@ def _convert_fluxvla_to_lerobot(
     for k in keys_sample:
         logging.info("  key: %s  shape: %s", k, tuple(state_dict[k].shape))
 
-    # FluxVLA name mapping — converts their training-time module prefixes to
-    # lerobot pi0.5 expected naming. Built up empirically from the sample above
-    # when first fired. THIS BLOCK NEEDS REAL VALUES once we see actual keys.
-    name_mapping = {
-        # Example placeholder (will be tuned on first fire):
-        # "module.paligemma_with_expert.paligemma.model.language_model": "model.language_model",
-        # "module.paligemma_with_expert.gemma_expert": "model.gemma_expert",
-        # "module.action_in_proj": "model.action_in_proj",
-        # ...
-    }
+    PREFIX_MAP = [
+        ('vision_backbone.vision.', 'paligemma_with_expert.paligemma.model.vision_tower.'),
+        ('llm_backbone.', 'paligemma_with_expert.paligemma.model.language_model.model.'),
+        ('llm_expert.', 'paligemma_with_expert.gemma_expert.model.'),
+        ('projector.projector.', 'paligemma_with_expert.paligemma.model.multi_modal_projector.linear.'),
+        ('action_in_proj.projector.', 'action_in_proj.'),
+        ('action_out_proj.projector.', 'action_out_proj.'),
+        ('time_mlp_in.projector.', 'action_time_mlp_in.'),
+        ('time_mlp_out.projector.', 'action_time_mlp_out.'),
+    ]
 
     def rename(k: str) -> str:
-        for src_prefix, dst_prefix in name_mapping.items():
+        for src_prefix, dst_prefix in PREFIX_MAP:
             if k.startswith(src_prefix):
                 return dst_prefix + k[len(src_prefix):]
         return k
 
     renamed = {rename(k): v for k, v in state_dict.items()}
+
+    embed_key = 'paligemma_with_expert.paligemma.model.language_model.model.embed_tokens.weight'
+    lm_head_key = 'paligemma_with_expert.paligemma.lm_head.weight'
+    if embed_key in renamed and lm_head_key not in renamed:
+        renamed[lm_head_key] = renamed[embed_key].clone()
+        logging.info("Added tied lm_head weight")
+
     logging.info("After rename: %d entries", len(renamed))
     save_file(renamed, str(output / "model.safetensors"))
 
@@ -415,7 +420,7 @@ def run_fluxvla_libero_eval(
     # Stage 3: Export via reflex
     logging.info("[Stage 3/4] Run reflex export pipeline...")
     if not Path(EXPORTED_ONNX_DIR + "/vlm_prefix.onnx").exists():
-        from reflex.exporters.pi05_exporter import export_pi05_decomposed
+        from reflex.exporters.decomposed import export_pi05_decomposed
         export_pi05_decomposed(
             checkpoint_path=converted_dir,
             output_dir=EXPORTED_ONNX_DIR,

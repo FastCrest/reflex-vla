@@ -159,15 +159,14 @@ REGISTRY: tuple[ModelEntry, ...] = (
     # ──────────────────────────────────────────────────────────────────────
     # Lift #4: FluxVLA pi0.5 LIBERO-10 fine-tuned checkpoint (Apache-2.0).
     # Published 97.85% on LIBERO-10 across 4 subsuites (FluxVLA paper).
-    # Points to limxdynamics/FluxVLAEngine subdirectory until republished
-    # to fastcrest/pi05-libero10-finetune-v1 (pending HF upload).
+    # Converted from limxdynamics/FluxVLAEngine to lerobot format.
     # ──────────────────────────────────────────────────────────────────────
     ModelEntry(
         model_id="pi05-libero10-fluxvla",
         hf_repo="Rylinjames/pi05-libero10-finetune-v1",
         family="pi05",
         action_dim=7,
-        size_mb=7200,
+        size_mb=8300,
         supported_embodiments=("franka",),
         supported_devices=("a10g", "a100", "h100", "h200"),
         benchmarks=(),
