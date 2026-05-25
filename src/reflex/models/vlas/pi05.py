@@ -200,6 +200,49 @@ class Pi05VLA(BaseVLA):
             past_key_values=batch.get("past_key_values"),
         )
 
+    # ── Phase B safetensors-direct loader (Lift #3) ─────────────────────
+
+    @classmethod
+    def flat_dict_from_safetensors(
+        cls,
+        safetensors_path: str,
+        *,
+        dtype: torch.dtype | None = torch.bfloat16,
+        device: str = "cuda",
+        device_id: int = 0,
+    ) -> dict[str, torch.Tensor]:
+        """Load a pi0.5 safetensors checkpoint directly into a flat
+        ``{key: tensor}`` dict — never instantiating any ``nn.Module``.
+
+        Same pattern as ``Pi0VLA.flat_dict_from_safetensors``. Pi0.5
+        differs from Pi0 in that expert layer norms (AdaRMSNorm) have
+        ``dense.weight/bias`` Parameters that must be KEPT (Pi0 skips
+        them because its DecomposedRMSNorm uses register_buffer).
+        """
+        from safetensors import safe_open
+
+        from reflex.models.vlas._pi05_safetensors_mapping import (
+            expand_tied_pi05,
+            pi05_safetensors_to_flat,
+        )
+
+        device_str = f"{device}:{device_id}" if device == "cuda" else device
+
+        flat: dict[str, torch.Tensor] = {}
+        with safe_open(safetensors_path, framework="pt", device=device_str) as f:
+            for src_key in f.keys():
+                target_key = pi05_safetensors_to_flat(src_key)
+                if target_key is None:
+                    continue
+                tensor = f.get_tensor(src_key)
+                if dtype is not None and tensor.dtype != dtype:
+                    tensor = tensor.to(dtype=dtype)
+                flat[target_key] = tensor
+
+        return expand_tied_pi05(flat)
+
+    # ── ABC contract ────────────────────────────────────────────────────
+
     def predict_action(
         self,
         *,
