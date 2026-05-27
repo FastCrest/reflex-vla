@@ -46,8 +46,20 @@ def export_module_to_onnx(
     return output_path
 
 
-def optimize_onnx(onnx_path: Path) -> Path:
-    """Run onnxsim for constant folding and optimization."""
+def optimize_onnx(onnx_path: Path, num_steps: int = 10) -> Path:
+    """Run weight fusion + onnxsim for constant folding and optimization.
+
+    Weight fusion (lifted from dexmal/realtime-vla MIT pattern):
+    fuses RMSNorm scales into adjacent MatMul weights and folds Euler
+    step dt into output projections. Then runs onnxsim for remaining
+    constant folding.
+    """
+    try:
+        from reflex.exporters.weight_fusion import fuse_weights
+        fuse_weights(onnx_path, num_steps=num_steps)
+    except Exception as e:
+        logger.warning("Weight fusion pass failed (non-fatal): %s", e)
+
     try:
         import onnxsim
         import onnx

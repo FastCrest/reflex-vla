@@ -1382,22 +1382,32 @@ def export_monolithic(
                 )
 
     if model_type == "smolvla":
-        return export_smolvla_monolithic(model_id, output_dir, num_steps=num_steps, target=target)
-    if model_type == "pi0":
-        return export_pi0_monolithic(model_id, output_dir, num_steps=num_steps, target=target)
-    if model_type == "pi05":
-        return export_pi05_monolithic(model_id, output_dir, num_steps=num_steps, target=target)
-    if model_type == "gr00t":
-        # GR00T is DDPM per-step; num_steps is runtime loop count, not baked.
-        # Clamp the default pi-family num_steps=10 to GR00T's canonical 4 if
-        # the caller didn't override. This only affects the informational
-        # reflex_config.json field.
+        result = export_smolvla_monolithic(model_id, output_dir, num_steps=num_steps, target=target)
+    elif model_type == "pi0":
+        result = export_pi0_monolithic(model_id, output_dir, num_steps=num_steps, target=target)
+    elif model_type == "pi05":
+        result = export_pi05_monolithic(model_id, output_dir, num_steps=num_steps, target=target)
+    elif model_type == "gr00t":
         gr00t_steps = 4 if num_steps == 10 else num_steps
-        return export_gr00t_monolithic(model_id, output_dir, num_steps=gr00t_steps, target=target)
+        result = export_gr00t_monolithic(model_id, output_dir, num_steps=gr00t_steps, target=target)
+    else:
+        raise ValueError(
+            f"Monolithic export for model_type={model_type!r} not yet supported."
+        )
 
-    raise ValueError(
-        f"Monolithic export for model_type={model_type!r} not yet supported."
-    )
+    # Post-export weight fusion pass (lifted from dexmal/realtime-vla MIT).
+    # Fuses RMSNorm scales into MatMul weights, folds Euler dt into output
+    # projections. Algebraically equivalent — zero accuracy cost.
+    onnx_path = result.get("onnx_path")
+    if onnx_path:
+        try:
+            from reflex.exporters.weight_fusion import fuse_weights
+            fused_path = fuse_weights(onnx_path, num_steps=num_steps)
+            logger.info("Weight fusion pass complete: %s", fused_path)
+        except Exception as e:
+            logger.warning("Weight fusion pass failed (non-fatal): %s", e)
+
+    return result
 
 
 __all__ = [
