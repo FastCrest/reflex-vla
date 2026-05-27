@@ -100,9 +100,9 @@ image = (
         "num2words",
         "imageio",
         "imageio-ffmpeg",
-        # FluxVLA-specific deps
-        "mmengine==0.10.7",
-        "accelerate==0.33.0",
+        # FluxVLA-specific deps (loose pins — let lerobot resolve conflicts)
+        "mmengine",
+        "accelerate",
         "sentencepiece",
         "tensorflow>=2.15",
         "draccus",
@@ -113,7 +113,7 @@ image = (
         "wandb",
         "timm",
         "peft",
-        "diffusers==0.30.2",
+        "diffusers",
         "matplotlib",
         "sentry-sdk",
         "tqdm-loggable",
