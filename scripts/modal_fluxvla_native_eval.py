@@ -67,7 +67,7 @@ FLUXVLA_SRC = "/opt/FluxVLA"
 # + mmengine + tensorflow (FluxVLA eval_utils uses tf for image resize)
 # ---------------------------------------------------------------------------
 image = (
-    modal.Image.from_registry("nvidia/cuda:12.4.0-devel-ubuntu22.04", add_python="3.12")
+    modal.Image.debian_slim(python_version="3.12")
     .apt_install(
         "git",
         "libgl1-mesa-glx", "libglib2.0-0", "libegl1-mesa", "libglvnd0", "ffmpeg",
@@ -123,7 +123,14 @@ image = (
     .run_commands(
         "pip install tensorflow-datasets tensorflow-graphics"
         " && pip install --no-deps dlimp@git+https://github.com/kvablack/dlimp"
-        " && CUDA_HOME=/usr/local/cuda pip install flash-attn --no-build-isolation"
+    )
+    # Mock flash_attn to avoid ABI mismatch — PI05FlowMatching uses SDPA, not FA2.
+    # The import only triggers via transformers' auto attention dispatch.
+    .run_commands(
+        "python -c \""
+        "import os; os.makedirs('/usr/local/lib/python3.12/site-packages/flash_attn', exist_ok=True); "
+        "open('/usr/local/lib/python3.12/site-packages/flash_attn/__init__.py', 'w').write("
+        "'# mock — PI05FlowMatching uses SDPA\\n')\""
     )
     # Clone + patch LIBERO (same as modal_fluxvla_checkpoint_eval.py)
     .run_commands(
