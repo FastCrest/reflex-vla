@@ -119,6 +119,7 @@ image = (
         "tqdm-loggable",
         "thop",
         "cloudpickle",
+        "dlimp @ git+https://github.com/kvablack/dlimp",
     )
     # Clone + patch LIBERO (same as modal_fluxvla_checkpoint_eval.py)
     .run_commands(
