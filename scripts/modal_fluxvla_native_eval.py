@@ -152,6 +152,8 @@ image = (
         "MUJOCO_GL": "osmesa",
         "PYOPENGL_PLATFORM": "osmesa",
         "TORCHINDUCTOR_DISABLE": "1",
+        "TRANSFORMERS_NO_FLASH_ATTENTION": "1",
+        "ATTN_BACKEND": "sdpa",
         "LIBERO_DATA_DIR": "/tmp/libero_data",
         "LIBERO_ASSET_DIR": "/opt/LIBERO/libero/libero/assets",
         "LIBERO_BASE": "/tmp/libero_data",
@@ -272,6 +274,13 @@ def run_fluxvla_native_eval(
     # Stage 2: Build model + load weights using FluxVLA's own machinery
     # -----------------------------------------------------------------------
     log.info("[Stage 2/3] Build model + load weights...")
+
+    # Patch transformers to skip flash_attn checks (our stub doesn't register with importlib)
+    import transformers.utils.import_utils as _tiu
+    if not hasattr(_tiu, '_orig_is_flash_attn_2_available'):
+        _tiu._orig_is_flash_attn_2_available = _tiu.is_flash_attn_2_available
+        _tiu.is_flash_attn_2_available = lambda *a, **k: False
+        _tiu.is_flash_attn_greater_or_equal_2_10 = lambda *a, **k: False
 
     # Import FluxVLA's builders (triggers mmengine registry population)
     from mmengine.config import Config as MmConfig
