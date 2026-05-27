@@ -67,7 +67,7 @@ FLUXVLA_SRC = "/opt/FluxVLA"
 # + mmengine + tensorflow (FluxVLA eval_utils uses tf for image resize)
 # ---------------------------------------------------------------------------
 image = (
-    modal.Image.debian_slim(python_version="3.12")
+    modal.Image.from_registry("nvidia/cuda:12.4.0-devel-ubuntu22.04", add_python="3.12")
     .apt_install(
         "git",
         "libgl1-mesa-glx", "libglib2.0-0", "libegl1-mesa", "libglvnd0", "ffmpeg",
