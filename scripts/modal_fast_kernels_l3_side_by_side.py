@@ -40,10 +40,17 @@ app = modal.App("reflex-fast-kernels-l3-side-by-side")
 
 
 def _repo_head_sha() -> str:
+    # REFLEX_PIN_SHA lets the monthly launchd runner pin origin/main explicitly,
+    # so the gate always tests SHIPPED code regardless of the working-tree branch
+    # (and without clobbering it). Unset → local HEAD, today's dev behavior.
+    pin = os.environ.get("REFLEX_PIN_SHA", "").strip()
+    if pin:
+        return pin
     try:
         return subprocess.check_output(
             ["git", "rev-parse", "HEAD"],
             cwd=os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+            stderr=subprocess.DEVNULL,  # quiet the expected "not a git repo" inside containers
         ).decode().strip()[:12]
     except Exception:
         return "lift/5-day1-2-vendor-triton-kernels"
