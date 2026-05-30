@@ -35,6 +35,13 @@ pip install 'reflex-vla[serve,onnx]'              # Mac / CPU runtime
 
 Requires Python ≥ 3.10.
 
+### What's new in v0.11.2 (2026-05-29)
+
+- **`reflex connect` works on a clean install** — `requests` is now a core dependency, so `reflex connect status` no longer raises `ModuleNotFoundError` on `pip install reflex-vla` without extras (it had been an undeclared import that only resolved transitively).
+- **`--fast-kernels` cleared the formal N=100/task L3 LIBERO parity gate** — on Pi0.5 LIBERO-10 tasks 0-2 (600 episodes), Triton fast kernels scored 91.3% (274/300) vs native ORT 85.3% (256/300) — 6.0pp *ahead* of native, so kill-trigger 3 stays clear and the opt-in Triton runtime stays on.
+- **Hardened monolithic serve/bench path, with external-data ONNX** — dedicated ORT provider-options + tokenizer-loading modules are extracted from the request hot path; ONNX models with external weight data (`.onnx` + `.onnx_data`, required once a graph exceeds the 2 GB protobuf limit) now load in both serve and the weight-fusion export pass.
+- **Cleaner streams** — integration-command errors route to stderr, so `--json` consumers and shell pipelines get a clean stdout.
+
 ### What's new in v0.11.1 (2026-05-27)
 
 - **Triton fast kernels** — 2.5x PyTorch, ~12x ORT on A100. Opt in with `reflex serve --fast-kernels` (requires the `[fast-kernels]` extra). Falls back to ORT silently when Triton is unavailable.
