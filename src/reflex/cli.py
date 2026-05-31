@@ -1303,6 +1303,187 @@ def eval_cmd(
         raise typer.Exit(5)
 
 
+@app.command(name="verify")
+def verify_cmd(
+    checkpoint_or_export: str = typer.Argument(
+        help="Path / HF id of the OPTIMIZED export (ONNX/Triton) under test. "
+             "The native-PyTorch reference defaults to this same checkpoint "
+             "unless --original is passed.",
+    ),
+    target: str = typer.Option(
+        "unknown", "--target",
+        help="Hardware SKU the export targets (e.g. orin, orin-nano). Recorded "
+             "in the PARITY.md receipt; does not change scoring in v0.",
+    ),
+    eval_suite: str = typer.Option(
+        "libero", "--eval",
+        help="Eval suite for the paired rollout. v0 ships LIBERO only "
+             "(matches `reflex eval`); SimplerEnv / customer suites follow.",
+    ),
+    original: str = typer.Option(
+        "", "--original",
+        help="Path / HF id of the ORIGINAL native-PyTorch policy to compare "
+             "against. Default: the checkpoint the export was built from.",
+    ),
+    task_suite: str = typer.Option(
+        "libero_10", "--task-suite",
+        help="LIBERO task suite name (libero_spatial / libero_object / "
+             "libero_goal / libero_10 / libero_90).",
+    ),
+    num_episodes: int = typer.Option(
+        30, "--num-episodes",
+        help="Episodes per task per arm. The Pro gate REFUSES to score fewer "
+             "than 30 paired episodes (insufficient statistical power).",
+    ),
+    tasks: str = typer.Option(
+        "", "--tasks",
+        help="Comma-separated LIBERO task indices (e.g. 0,1,2). Empty = all "
+             "tasks in the suite.",
+    ),
+    seed: int = typer.Option(
+        7, "--seed",
+        help="RNG seed shared by both arms so episodes are paired (same "
+             "LIBERO initial state in the original + optimized arm).",
+    ),
+    output: str = typer.Option(
+        "./verify_output", "--output",
+        help="Directory for the PARITY.md receipt (+ JSON). Created if missing.",
+    ),
+    output_json: bool = typer.Option(
+        False, "--json", help="Emit the machine-readable verdict to stdout.",
+    ),
+    verbose: bool = typer.Option(False, help="Verbose logging"),
+):
+    """Action-parity gate: does the OPTIMIZED export behave like the ORIGINAL?
+
+    Runs the native-PyTorch policy and the ONNX/Triton export through the SAME
+    LIBERO loop (paired by task + seed), then scores the paired outcomes through
+    the Reflex Pro 9-gate evaluator (original = baseline, optimized = candidate)
+    and writes a PARITY.md receipt. Exit code 0 = PASS, 1 = FAIL, 2 = error.
+
+    v0 reuses the shipped Pro gate + the proven rollout loop; the load-bearing
+    signal is success-rate parity (success-cliff + Wilson gates). The
+    distributional engine (MMD / energy-distance) and embodied metrics (jerk,
+    completion-time, motion-energy) are flagged follow-ups — see the
+    TODO(reflex-verify) anchors in src/reflex/verify.py.
+
+    Examples:
+        reflex verify ./my-export --target orin --eval libero
+        reflex verify ./my-export --tasks 0,1,2 --num-episodes 50
+        reflex verify ./my-export --original lerobot/pi05_libero --json
+    """
+    _setup_logging(verbose)
+
+    from reflex.verify import (
+        SUPPORTED_SUITES,
+        InsufficientEpisodes,
+        run_verify,
+    )
+
+    if eval_suite not in SUPPORTED_SUITES:
+        err_console.print(
+            f"[red]Unknown --eval suite: {eval_suite!r}. "
+            f"v0 supports: {', '.join(SUPPORTED_SUITES)}.[/red]"
+        )
+        raise typer.Exit(2)
+
+    parsed_task_indices: list[int] | None = None
+    if tasks.strip():
+        try:
+            parsed_task_indices = [
+                int(t.strip()) for t in tasks.split(",") if t.strip()
+            ]
+        except ValueError:
+            err_console.print(
+                f"[red]--tasks must be comma-separated integers, got: {tasks!r}[/red]"
+            )
+            raise typer.Exit(2)
+
+    console.print("\n[bold]Reflex Verify[/bold] [dim](action-parity gate · v0)[/dim]")
+    console.print(f"  Optimized:  {checkpoint_or_export}")
+    console.print(f"  Original:   {original or '[dim](same checkpoint)[/dim]'}")
+    console.print(f"  Eval suite: [cyan]{eval_suite}[/cyan] ({task_suite})")
+    console.print(f"  Target:     {target}")
+    console.print(f"  Episodes:   {num_episodes} per task per arm")
+    console.print(f"  Seed:       {seed}")
+    console.print(f"  Output:     {output}")
+
+    try:
+        verdict = run_verify(
+            optimized_ref=checkpoint_or_export,
+            original_ref=original or None,
+            suite=eval_suite,
+            target=target,
+            task_suite_name=task_suite,
+            num_episodes=num_episodes,
+            task_indices=parsed_task_indices,
+            seed=seed,
+        )
+    except KeyboardInterrupt:
+        console.print("\n[yellow]Verify interrupted by user.[/yellow]")
+        raise typer.Exit(130)
+    except InsufficientEpisodes as exc:
+        err_console.print(
+            f"[red]Insufficient paired episodes for a parity verdict: {exc}[/red]\n"
+            f"  Raise --num-episodes (>= 30 episodes recommended) and re-run."
+        )
+        raise typer.Exit(2)
+    except (FileNotFoundError, ValueError) as exc:
+        err_console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(2)
+    except Exception as exc:  # noqa: BLE001
+        if verbose:
+            import traceback
+            traceback.print_exc()
+        err_console.print(f"[red]Verify failed with unexpected error: {exc}[/red]")
+        console.print("[yellow]Re-run with --verbose for the full traceback.[/yellow]")
+        raise typer.Exit(2)
+
+    if output_json:
+        print(json.dumps(verdict.to_dict(), indent=2, default=str))
+    else:
+        gate_table = Table(title="Parity gates", show_header=True, header_style="bold")
+        gate_table.add_column("Gate")
+        gate_table.add_column("Class")
+        gate_table.add_column("Result", justify="center")
+        gate_table.add_column("Measured", justify="right")
+        gate_table.add_column("Threshold", justify="right")
+        for g in verdict.eval_report.all_gates:
+            gate_table.add_row(
+                g.gate_id,
+                g.gate_class,
+                "[green]PASS[/green]" if g.passed else "[red]FAIL[/red]",
+                f"{g.measured:.4g}",
+                f"{g.threshold:.4g}",
+            )
+        console.print(gate_table)
+        console.print(
+            f"\n  Success rate: original "
+            f"[bold]{verdict.original_success_rate * 100:.1f}%[/bold] → "
+            f"optimized [bold]{verdict.optimized_success_rate * 100:.1f}%[/bold] "
+            f"({verdict.success_rate_delta * 100:+.1f}pp)"
+        )
+        if verdict.first_failing_gate_id:
+            console.print(
+                f"  First failing gate: [red]{verdict.first_failing_gate_id}[/red]"
+            )
+        verdict_render = (
+            "[green]PASS[/green]" if verdict.passed else "[red]FAIL[/red]"
+        )
+        console.print(f"\n  Verdict: {verdict_render}")
+
+    try:
+        from reflex.parity_report import write_parity_report
+        report_path = write_parity_report(output, verdict)
+        if not output_json:
+            console.print(f"  [dim]Parity receipt: {report_path}[/dim]")
+    except Exception as exc:  # noqa: BLE001
+        if not output_json:
+            console.print(f"[yellow]Parity receipt write skipped: {exc}[/yellow]")
+
+    raise typer.Exit(0 if verdict.passed else 1)
+
+
 @app.command(hidden=True)
 def guard(
     action: str = typer.Argument(help="Action to check: 'init' to create config, 'check' to validate"),
