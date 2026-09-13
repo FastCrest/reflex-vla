@@ -153,7 +153,10 @@ _hf_cache_volume = modal.Volume.from_name("pi0-hf-cache", create_if_missing=True
 @app.function(
     image=image,
     gpu="A10G",
-    timeout=7200,
+    cpu=4.0,
+    memory=16384,
+    retries=0,
+    timeout=1500,
     secrets=[_hf_secret()],
     volumes={
         "/onnx_out": _onnx_output_volume,

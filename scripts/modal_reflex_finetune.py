@@ -112,7 +112,10 @@ image = (
 @app.function(
     image=image,
     gpu="A10G",
-    timeout=21600,  # 6 hr — SmolVLA LoRA runs typically finish in <1hr
+    cpu=4.0,
+    memory=16384,
+    retries=0,
+    timeout=3600,
     volumes={HF_CACHE_PATH: hf_cache, ONNX_OUTPUT_PATH: onnx_output},
     secrets=[_hf_secret()],
 )
