@@ -31,7 +31,6 @@ Usage:
 """
 import json
 import os
-import subprocess
 import modal
 
 app = modal.App("tether-libero-lerobot-native")
@@ -53,19 +52,6 @@ def _hf_secret():
         return modal.Secret.from_name("huggingface")
     except Exception:
         return modal.Secret.from_dict({})
-
-
-def _repo_head_sha() -> str:
-    try:
-        return subprocess.check_output(
-            ["git", "rev-parse", "HEAD"],
-            cwd=os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-        ).decode().strip()[:12]
-    except Exception:
-        return "main"
-
-
-_HEAD = _repo_head_sha()
 
 
 # Image: Python 3.12 + lerobot 0.5.1 + LIBERO + MuJoCo + robosuite 1.4.1.
@@ -114,13 +100,11 @@ image = (
     )
     .add_local_file("scripts/patch_libero.py", "/root/patch_libero.py", copy=True)
     .run_commands("python /root/patch_libero.py")
-    # Pull tether so `tether.distill.snapflow_pi0_model` is importable
-    # when --snapflow-student is used. Uses the github-token secret to
-    # clone the private repo. Cheap — this only pulls the Python package.
-    .run_commands(
-        f'pip install "fastcrest-tether @ git+https://x-access-token:$GITHUB_TOKEN@github.com/FastCrest/tether@{_HEAD}"',
-        secrets=[modal.Secret.from_name("github-token")],
-    )
+    # Package the checked-out source so the build needs no repository token.
+    .add_local_dir("src", "/opt/tether/src", copy=True)
+    .add_local_file("pyproject.toml", "/opt/tether/pyproject.toml", copy=True)
+    .add_local_file("README.md", "/opt/tether/README.md", copy=True)
+    .run_commands("pip install /opt/tether")
     .env({
         "MUJOCO_GL": "osmesa",
         "PYOPENGL_PLATFORM": "osmesa",

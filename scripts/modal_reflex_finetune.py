@@ -26,7 +26,6 @@ Cost notes: SmolVLA LoRA on a 500-sample dataset for 2000 steps runs
 bigger backbone — budget accordingly.
 """
 import os
-import subprocess
 import json
 import modal
 
@@ -41,18 +40,6 @@ def _hf_secret():
         return modal.Secret.from_dict({"HF_TOKEN": token})
     return modal.Secret.from_name("huggingface")
 
-
-def _repo_head_sha() -> str:
-    try:
-        return subprocess.check_output(
-            ["git", "rev-parse", "HEAD"],
-            cwd=os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-        ).decode().strip()[:12]
-    except Exception:
-        return "main"
-
-
-_HEAD = _repo_head_sha()
 
 hf_cache = modal.Volume.from_name("pi0-hf-cache", create_if_missing=True)
 onnx_output = modal.Volume.from_name("pi0-onnx-outputs", create_if_missing=True)
@@ -93,15 +80,10 @@ image = (
         "typer",
         "rich",
     )
-    .run_commands(
-        # [monolithic] extra pulls onnx-diagnostic + optree + scipy,
-        # which tether.exporters.monolithic needs at import time for the
-        # auto-export chain that runs after training succeeds.
-        # GITHUB_TOKEN injected from modal secret `github-token` because
-        # the repo is private.
-        f'pip install "fastcrest-tether[monolithic] @ git+https://x-access-token:$GITHUB_TOKEN@github.com/FastCrest/tether@{_HEAD}"',
-        secrets=[modal.Secret.from_name("github-token")],
-    )
+    .add_local_dir("src", "/opt/tether/src", copy=True)
+    .add_local_file("pyproject.toml", "/opt/tether/pyproject.toml", copy=True)
+    .add_local_file("README.md", "/opt/tether/README.md", copy=True)
+    .run_commands('pip install "/opt/tether[monolithic]"')
     .env({
         "HF_HOME": HF_CACHE_PATH,
         "TRANSFORMERS_CACHE": f"{HF_CACHE_PATH}/transformers",
