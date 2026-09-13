@@ -190,11 +190,15 @@ def run_ported_libero(
     print(f"[ported] Loading {model_id}...")
     t0 = time.time()
     from lerobot.processor.pipeline import PolicyProcessorPipeline
+    from lerobot.configs.policies import PreTrainedConfig
     from lerobot.processor.converters import (
         batch_to_transition, transition_to_batch,
         policy_action_to_transition, transition_to_policy_action,
     )
     from huggingface_hub import snapshot_download
+
+    def _resolve_repo(ref: str, **kwargs):
+        return ref if os.path.isdir(ref) else snapshot_download(ref, **kwargs)
 
     # Dispatch:
     # - snapflow_onnx set → load ONNX session via onnxruntime (no PyTorch
@@ -217,6 +221,7 @@ def run_ported_libero(
         from tether.distill.snapflow_pi0_model import load_snapflow_student
         print(f"[ported] Loading SnapFlow student from {snapflow_student} (1-NFE inference)")
         policy = load_snapflow_student(snapflow_student)
+        rollout_config = policy.config
         detected_type = "snapflow_student_onnx" if use_onnx else "snapflow_student"
         repo_dir = preprocessor_ref or snapflow_student
         if use_onnx:
@@ -249,13 +254,33 @@ def run_ported_libero(
             from peft import PeftModel
             base_kwargs = {"revision": adapter_base_revision} if adapter_base_revision else {}
             adapter_kwargs = {"revision": revision} if revision else {}
-            policy = SmolVLAPolicy.from_pretrained(adapter_base, **base_kwargs)
+            repo_dir = _resolve_repo(adapter_path, **adapter_kwargs)
+            rollout_config = PreTrainedConfig.from_pretrained(repo_dir)
+            policy = SmolVLAPolicy.from_pretrained(
+                adapter_base,
+                config=rollout_config,
+                **base_kwargs,
+            )
+            rollout_config = policy.config
             policy = PeftModel.from_pretrained(policy, adapter_path, **adapter_kwargs)
-            repo_dir = snapshot_download(adapter_base, **base_kwargs)
+            # The adapter checkpoint contains the dataset-derived processor
+            # configs written by LeRobot training. Reusing the base policy's
+            # processors here would silently normalize LIBERO observations
+            # and actions with the wrong statistics.
             detected_type = "smolvla-lora"
         else:
-            policy = policy_cls.from_pretrained(model_id, **load_kwargs)
-            repo_dir = snapshot_download(model_id, **load_kwargs)
+            if preprocessor_ref:
+                repo_dir = _resolve_repo(preprocessor_ref)
+                rollout_config = PreTrainedConfig.from_pretrained(repo_dir)
+                policy = policy_cls.from_pretrained(
+                    model_id,
+                    config=rollout_config,
+                    **load_kwargs,
+                )
+            else:
+                policy = policy_cls.from_pretrained(model_id, **load_kwargs)
+                repo_dir = snapshot_download(model_id, **load_kwargs)
+            rollout_config = policy.config
 
     policy.eval().to("cuda").to(torch.float32)
 
@@ -278,7 +303,7 @@ def run_ported_libero(
     )
     if is_state_out:
         from tether.distill.pi05_state_out_processor import swap_prepare_step_in_pipeline
-        max_state_dim = getattr(policy.config, "max_state_dim", 32)
+        max_state_dim = getattr(rollout_config, "max_state_dim", 32)
         swap_prepare_step_in_pipeline(preprocessor, max_state_dim=max_state_dim)
         print(f"[ported] Swapped preprocessor for state-out (max_state_dim={max_state_dim})")
     # Postprocessor unnormalizes policy output back to env action space.
@@ -365,12 +390,20 @@ def run_ported_libero(
             np.asarray(obs["robot0_gripper_qpos"], dtype=np.float32),
         ]).astype(np.float32)
 
+        visual_keys = [
+            key
+            for key, feature in rollout_config.input_features.items()
+            if str(getattr(feature, "type", "")).upper().endswith("VISUAL")
+        ]
+        if not visual_keys:
+            visual_keys = ["observation.images.image", "observation.images.image2"]
+
         batch = {
-            "observation.images.image": _to_tensor(img),
-            "observation.images.image2": _to_tensor(wrist_img),
             "observation.state": torch.from_numpy(state).unsqueeze(0).to("cuda"),
             "task": [task_description],
         }
+        for key, image in zip(visual_keys, (img, wrist_img), strict=False):
+            batch[key] = _to_tensor(image)
         return batch
 
     # ─── Results struct ──────────────────────────────────────────────
@@ -474,7 +507,7 @@ def run_ported_libero(
                                     images, img_masks = policy._preprocess_images(batch_pp)
                                     lang_tokens = batch_pp[OBS_LANGUAGE_TOKENS]
                                     lang_masks = batch_pp[OBS_LANGUAGE_ATTENTION_MASK]
-                                    cfg = policy.config
+                                    cfg = rollout_config
                                     chunk_size = cfg.chunk_size
                                     action_dim_pad = cfg.max_action_dim
                                     bsize = images[0].shape[0]
@@ -549,7 +582,7 @@ def run_ported_libero(
                                     # path bypasses that wrapper, so replicate
                                     # the trim here.
                                     from lerobot.utils.constants import ACTION
-                                    orig_dim = policy.config.output_features[ACTION].shape[0]
+                                    orig_dim = rollout_config.output_features[ACTION].shape[0]
                                     chunk = chunk[:, :, :orig_dim]
                                 else:
                                     chunk = policy.predict_action_chunk(batch_pp)

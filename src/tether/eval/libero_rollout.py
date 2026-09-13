@@ -168,7 +168,7 @@ def run_libero_rollout(
         OBS_LANGUAGE_ATTENTION_MASK, OBS_LANGUAGE_TOKENS, OBS_STATE, ACTION,
     )
 
-    cfg = policy.config
+    cfg = getattr(policy, "tether_rollout_config", policy.config)
     chunk_size = cfg.chunk_size
     action_dim_pad = cfg.max_action_dim
     real_action_dim = cfg.output_features[ACTION].shape[0]
@@ -242,12 +242,20 @@ def run_libero_rollout(
             _quat2axisangle(np.asarray(obs["robot0_eef_quat"], dtype=np.float32).copy()),
             np.asarray(obs["robot0_gripper_qpos"], dtype=np.float32),
         ]).astype(np.float32)
-        return {
-            "observation.images.image": _to_tensor(img),
-            "observation.images.image2": _to_tensor(wrist_img),
+        visual_keys = [
+            key
+            for key, feature in cfg.input_features.items()
+            if str(getattr(feature, "type", "")).upper().endswith("VISUAL")
+        ]
+        if not visual_keys:
+            visual_keys = ["observation.images.image", "observation.images.image2"]
+        batch = {
             "observation.state": torch.from_numpy(state).unsqueeze(0).to("cuda"),
             "task": [task_description],
         }
+        for key, image in zip(visual_keys, (img, wrist_img), strict=False):
+            batch[key] = _to_tensor(image)
+        return batch
 
     # ─── Results ─────────────────────────────────────────────────────
     results = {

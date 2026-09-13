@@ -214,6 +214,8 @@ def _invoke_one_suite(
     ]
     if checkpoint.revision:
         cmd.extend(["--revision", checkpoint.revision])
+    if checkpoint.processor_source:
+        cmd.extend(["--preprocessor-ref", checkpoint.processor_source])
     if checkpoint.kind == "smolvla-lora":
         cmd.extend(["--adapter-path", checkpoint.source, "--adapter-base", checkpoint.base or ""])
         if checkpoint.base_revision:

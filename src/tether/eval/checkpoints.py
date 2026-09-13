@@ -20,6 +20,9 @@ class CheckpointSpec:
     revision: str | None = None
     files: tuple[dict, ...] = ()
     base_revision: str | None = None
+    processor_source: str | None = None
+    processor_revision: str | None = None
+    processor_identity: str | None = None
 
     def to_dict(self) -> dict:
         value = asdict(self)
@@ -51,8 +54,29 @@ def resolve_checkpoint(
     base: str | None = None,
     revision: str | None = None,
     base_revision: str | None = None,
+    processor_source: str | Path | None = None,
+    processor_revision: str | None = None,
 ) -> CheckpointSpec:
     """Resolve a checkpoint without downloading it or selecting a fallback."""
+    resolved_processor = None
+    processor_identity = None
+    if processor_source:
+        processor_path = Path(processor_source).expanduser()
+        if processor_path.exists():
+            if not processor_path.is_dir():
+                raise CheckpointError("A local processor checkpoint must be a directory.")
+            processor_files = _file_manifest(processor_path)
+            processor_identity = "sha256:" + hashlib.sha256(
+                json.dumps(processor_files, sort_keys=True).encode()
+            ).hexdigest()
+            resolved_processor = str(processor_path.resolve())
+        else:
+            resolved_processor = str(processor_source).removeprefix("hf://")
+            if "/" not in resolved_processor:
+                raise CheckpointError("A processor checkpoint must be a local directory or Hugging Face repository.")
+            if not processor_revision:
+                raise CheckpointError("A remote processor checkpoint requires --processor-revision.")
+            processor_identity = f"hf:{resolved_processor}@{processor_revision}"
     raw = str(source)
     path = Path(raw).expanduser()
     if path.exists():
@@ -78,7 +102,10 @@ def resolve_checkpoint(
             raise CheckpointError("The local checkpoint directory contains no files.")
         identity_input = json.dumps({"kind": detected, "base": resolved_base, "base_revision": base_revision, "files": files}, sort_keys=True)
         identity = "sha256:" + hashlib.sha256(identity_input.encode()).hexdigest()
-        return CheckpointSpec(detected, str(path.resolve()), identity, resolved_base, revision, files, base_revision)
+        return CheckpointSpec(
+            detected, str(path.resolve()), identity, resolved_base, revision, files,
+            base_revision, resolved_processor, processor_revision, processor_identity,
+        )
 
     if raw.startswith(("/", "./", "../", "~")):
         raise CheckpointError(f"Checkpoint path not found: {raw}")
@@ -100,4 +127,8 @@ def resolve_checkpoint(
         f"hf-lora:{remote}@{revision}+{base}@{base_revision}"
         if detected == "smolvla-lora" else f"hf:{remote}@{revision}"
     )
-    return CheckpointSpec(detected, remote, identity, base, revision, base_revision=base_revision)
+    return CheckpointSpec(
+        detected, remote, identity, base, revision, base_revision=base_revision,
+        processor_source=resolved_processor, processor_revision=processor_revision,
+        processor_identity=processor_identity,
+    )

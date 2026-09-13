@@ -54,6 +54,8 @@ def test_local_lora_loader_forwards_pinned_adapter_and_base_revisions(monkeypatc
     calls = {}
 
     class Policy:
+        config = object()
+
         @classmethod
         def from_pretrained(cls, source, **kwargs):
             calls["base"] = (source, kwargs)
@@ -77,7 +79,10 @@ def test_local_lora_loader_forwards_pinned_adapter_and_base_revisions(monkeypatc
             return policy
 
     monkeypatch.setitem(sys.modules, "peft", types.SimpleNamespace(PeftModel=Peft))
-    monkeypatch.setitem(sys.modules, "huggingface_hub", types.SimpleNamespace(snapshot_download=lambda source, **kwargs: "/base"))
+    monkeypatch.setitem(sys.modules, "huggingface_hub", types.SimpleNamespace(snapshot_download=lambda source, **kwargs: "/adapter"))
+    monkeypatch.setitem(sys.modules, "lerobot.configs.policies", types.SimpleNamespace(
+        PreTrainedConfig=types.SimpleNamespace(from_pretrained=lambda source: "dataset-config")
+    ))
     monkeypatch.setitem(sys.modules, "lerobot.processor.converters", types.SimpleNamespace(
         batch_to_transition=object(), policy_action_to_transition=object(),
         transition_to_batch=object(), transition_to_policy_action=object(),
@@ -90,8 +95,24 @@ def test_local_lora_loader_forwards_pinned_adapter_and_base_revisions(monkeypatc
         revision="adapter-rev", base="org/base", base_revision="base-rev",
     )
     load_smolvla_checkpoint(spec)
-    assert calls["base"] == ("org/base", {"revision": "base-rev"})
+    assert calls["base"] == ("org/base", {"config": "dataset-config", "revision": "base-rev"})
     assert calls["adapter"] == ("org/adapter", {"revision": "adapter-rev"})
+
+
+def test_parent_checkpoint_records_dataset_processor_identity(tmp_path):
+    processor = tmp_path / "candidate"
+    processor.mkdir()
+    (processor / "config.json").write_text("{}")
+    (processor / "policy_preprocessor.json").write_text("{}")
+    spec = resolve_checkpoint(
+        "org/base",
+        revision="base-rev",
+        processor_source=processor,
+    )
+    assert spec.identity == "hf:org/base@base-rev"
+    assert spec.processor_source == str(processor.resolve())
+    assert spec.processor_identity.startswith("sha256:")
+    assert spec.to_dict()["processor_identity"] == spec.processor_identity
 
 
 def test_modal_command_names_selected_adapter_and_never_uses_reference(tmp_path):
@@ -116,3 +137,29 @@ def test_modal_command_names_selected_adapter_and_never_uses_reference(tmp_path)
     assert command[command.index("--adapter-base") + 1] == "org/base"
     assert command[command.index("--adapter-base-revision") + 1] == "base-rev"
     assert "HuggingFaceVLA/smolvla_libero" not in command
+
+
+def test_modal_parent_command_names_dataset_processor_checkpoint(tmp_path):
+    scripts = tmp_path / "scripts"
+    scripts.mkdir()
+    (scripts / "modal_libero_lerobot_native.py").write_text("# fixture")
+    captured = []
+
+    def invoke(command, timeout):
+        captured.append(command)
+        return subprocess.CompletedProcess(command, 1, "", "fixture stop")
+
+    spec = resolve_checkpoint(
+        "org/base",
+        revision="base-rev",
+        processor_source="org/candidate",
+        processor_revision="candidate-rev",
+    )
+    run_libero_on_modal(
+        config=LiberoSuiteConfig(tasks=("libero_10",), task_indices=(0,), num_episodes=1),
+        checkpoint=spec,
+        repo_root=tmp_path,
+        modal_invoker=invoke,
+    )
+    command = captured[0]
+    assert command[command.index("--preprocessor-ref") + 1] == "org/candidate"

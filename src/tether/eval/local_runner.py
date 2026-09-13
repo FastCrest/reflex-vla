@@ -35,6 +35,7 @@ def load_smolvla_checkpoint(spec: CheckpointSpec):
         transition_to_batch, transition_to_policy_action,
     )
     from lerobot.processor.pipeline import PolicyProcessorPipeline
+    from lerobot.configs.policies import PreTrainedConfig
     from lerobot.policies.smolvla.modeling_smolvla import SmolVLAPolicy
 
     load_source = spec.source
@@ -43,14 +44,34 @@ def load_smolvla_checkpoint(spec: CheckpointSpec):
         from peft import PeftModel
         base_kwargs = {"revision": spec.base_revision} if spec.base_revision else {}
         adapter_kwargs = {"revision": spec.revision} if spec.revision else {}
-        policy = SmolVLAPolicy.from_pretrained(spec.base, **base_kwargs)
+        processor_source = (
+            load_source
+            if Path(load_source).exists()
+            else snapshot_download(load_source, **adapter_kwargs)
+        )
+        rollout_config = PreTrainedConfig.from_pretrained(processor_source)
+        policy = SmolVLAPolicy.from_pretrained(
+            spec.base, config=rollout_config, **base_kwargs
+        )
         policy = PeftModel.from_pretrained(policy, load_source, **adapter_kwargs)
-        processor_source = snapshot_download(spec.base, **base_kwargs) if not Path(spec.base).exists() else spec.base
     elif spec.kind == "full":
-        policy = SmolVLAPolicy.from_pretrained(load_source, **kwargs)
-        processor_source = snapshot_download(load_source, **kwargs) if not Path(load_source).exists() else load_source
+        if spec.processor_source:
+            processor_kwargs = {"revision": spec.processor_revision} if spec.processor_revision else {}
+            processor_source = (
+                spec.processor_source
+                if Path(spec.processor_source).exists()
+                else snapshot_download(spec.processor_source, **processor_kwargs)
+            )
+            rollout_config = PreTrainedConfig.from_pretrained(processor_source)
+            policy = SmolVLAPolicy.from_pretrained(
+                load_source, config=rollout_config, **kwargs
+            )
+        else:
+            policy = SmolVLAPolicy.from_pretrained(load_source, **kwargs)
+            processor_source = snapshot_download(load_source, **kwargs) if not Path(load_source).exists() else load_source
     else:
         raise LocalEvaluationUnavailable(f"Unsupported checkpoint kind: {spec.kind}")
+    policy.tether_rollout_config = rollout_config if "rollout_config" in locals() else policy.config
     policy = policy.to("cuda").eval()
     preprocessor = PolicyProcessorPipeline.from_pretrained(
         pretrained_model_name_or_path=processor_source,

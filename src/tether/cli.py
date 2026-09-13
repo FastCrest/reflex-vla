@@ -1443,6 +1443,12 @@ def eval_cmd(
     adapter_base_revision: str = typer.Option(
         "", "--adapter-base-revision", help="Exact revision of a remote LoRA base checkpoint.",
     ),
+    processor_checkpoint: str = typer.Option(
+        "", "--processor-checkpoint", help="Dataset processor checkpoint used by a full parent during matched evaluation.",
+    ),
+    processor_revision: str = typer.Option(
+        "", "--processor-revision", help="Exact revision of a remote processor checkpoint.",
+    ),
     task_indices: str = typer.Option(
         "", "--task-indices", help="Comma-separated LIBERO task indices; empty means all tasks in each selected suite.",
     ),
@@ -1536,6 +1542,8 @@ def eval_cmd(
             export_dir, kind=checkpoint_kind, base=adapter_base or None,
             revision=checkpoint_revision or None,
             base_revision=adapter_base_revision or None,
+            processor_source=processor_checkpoint or None,
+            processor_revision=processor_revision or None,
         )
     except CheckpointError as exc:
         err_console.print(f"[red]Checkpoint error: {exc}[/red]")
