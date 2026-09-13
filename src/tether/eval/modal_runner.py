@@ -55,6 +55,7 @@ TASK_SUITE_MAX_STEPS: dict[str, int] = {
 
 # Path to the wrapped script, relative to repo root.
 DEFAULT_MODAL_SCRIPT = "scripts/modal_libero_lerobot_native.py"
+MODAL_RESULT_PREFIX = "TETHER_MODAL_RESULT_JSON="
 
 
 class ModalNotInstalledError(RuntimeError):
@@ -275,6 +276,25 @@ def _parse_modal_stdout(stdout: str, *, suite: str) -> dict | None:
     if not stdout:
         return None
 
+    # Prefer the versioned machine-readable envelope emitted by the native
+    # runner. Modal may interleave build and application logs around it, so
+    # parse the last complete envelope rather than treating stdout as JSON.
+    envelopes = [
+        line.removeprefix(MODAL_RESULT_PREFIX)
+        for line in stdout.splitlines()
+        if line.startswith(MODAL_RESULT_PREFIX)
+    ]
+    if envelopes:
+        try:
+            parsed = json.loads(envelopes[-1])
+        except json.JSONDecodeError:
+            logger.warning("modal stdout contains a malformed result envelope")
+            return None
+        if parsed.get("schema_version") != 1 or parsed.get("suite") != suite:
+            logger.warning("modal result envelope has the wrong schema or suite")
+            return None
+        return parsed
+
     # Look for the end-of-suite summary header
     header = _RESULT_HEADER_RE.search(stdout)
     if header is None:
@@ -413,6 +433,7 @@ def _failure_row(*, suite: str, episode_index: int, error_message: str) -> Episo
 
 __all__ = [
     "DEFAULT_MODAL_SCRIPT",
+    "MODAL_RESULT_PREFIX",
     "ModalInvocationError",
     "ModalInvocationResult",
     "ModalInvoker",

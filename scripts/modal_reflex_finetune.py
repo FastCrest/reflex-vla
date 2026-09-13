@@ -27,6 +27,7 @@ bigger backbone — budget accordingly.
 """
 import os
 import subprocess
+import json
 import modal
 
 app = modal.App("tether-finetune")
@@ -117,7 +118,9 @@ image = (
 )
 def finetune_modal(
     base: str = "lerobot/smolvla_base",
+    base_revision: str = "",
     dataset: str = "lerobot/libero",
+    dataset_revision: str = "",
     output_subdir: str = "finetune_smolvla_libero",
     num_steps: int = 5000,
     batch_size: int = 8,
@@ -141,7 +144,9 @@ def finetune_modal(
 
     cfg = FinetuneConfig(
         base=base,
+        base_revision=base_revision or None,
         dataset=dataset,
+        dataset_revision=dataset_revision or None,
         output=output,
         num_steps=num_steps,
         batch_size=batch_size,
@@ -180,7 +185,9 @@ def finetune_modal(
 @app.local_entrypoint()
 def main(
     base: str = "lerobot/smolvla_base",
+    base_revision: str = "",
     dataset: str = "lerobot/libero",
+    dataset_revision: str = "",
     output_subdir: str = "finetune_smolvla_libero",
     steps: int = 5000,
     batch_size: int = 8,
@@ -199,7 +206,9 @@ def main(
           f"lora_r={lora_rank}")
     r = finetune_modal.remote(
         base=base,
+        base_revision=base_revision,
         dataset=dataset,
+        dataset_revision=dataset_revision,
         output_subdir=output_subdir,
         num_steps=steps,
         batch_size=batch_size,
@@ -213,3 +222,16 @@ def main(
     print("\n=== RESULT ===")
     for k, v in r.items():
         print(f"  {k}: {v}")
+    envelope = {
+        "schema_version": 1,
+        "base": base,
+        "base_revision": base_revision or None,
+        "dataset": dataset,
+        "dataset_revision": dataset_revision or None,
+        "seed": seed,
+        "steps": steps,
+        "batch_size": batch_size,
+        "lora_rank": lora_rank,
+        "result": r,
+    }
+    print("TETHER_MODAL_TRAIN_RESULT_JSON=" + json.dumps(envelope, sort_keys=True, separators=(",", ":")))

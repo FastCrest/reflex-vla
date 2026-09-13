@@ -1,6 +1,7 @@
 """Tests for src/tether/eval/modal_runner.py — Modal subprocess wrapper."""
 from __future__ import annotations
 
+import json
 import subprocess
 from pathlib import Path
 
@@ -9,6 +10,7 @@ import pytest
 from tether.eval.libero import EpisodeResult, LiberoSuiteConfig
 from tether.eval.modal_runner import (
     DEFAULT_MODAL_SCRIPT,
+    MODAL_RESULT_PREFIX,
     TASK_SUITE_MAX_STEPS,
     ModalInvocationResult,
     ModalNotInstalledError,
@@ -54,6 +56,35 @@ def test_parse_extracts_aggregate_counts():
     assert len(parsed["per_task"]) == 2
     assert parsed["per_task"][0] == {"task_idx": 0, "success": 3, "total": 5}
     assert parsed["per_task"][1] == {"task_idx": 1, "success": 4, "total": 5}
+
+
+def test_parse_prefers_machine_readable_envelope_with_checkpoint_identity():
+    envelope = {
+        "schema_version": 1,
+        "suite": "libero_10",
+        "model": "org/candidate",
+        "revision": "candidate-sha",
+        "checkpoint_kind": "smolvla-lora",
+        "adapter_base": "lerobot/smolvla_base",
+        "adapter_base_revision": "base-sha",
+        "task_indices": [0],
+        "seed": 8001,
+        "total_success": 1,
+        "total_eps": 1,
+        "success_rate_pct": 100.0,
+        "per_task": [{"task_idx": 0, "success": 1, "total": 1}],
+    }
+    stdout = "build log\n" + MODAL_RESULT_PREFIX + json.dumps(envelope) + "\nfinished\n"
+    assert _parse_modal_stdout(stdout, suite="libero_10") == envelope
+
+
+def test_parse_rejects_result_envelope_for_another_suite():
+    stdout = MODAL_RESULT_PREFIX + json.dumps({
+        "schema_version": 1,
+        "suite": "libero_goal",
+        "per_task": [],
+    })
+    assert _parse_modal_stdout(stdout, suite="libero_10") is None
 
 
 def test_parse_handles_zero_per_task_lines_when_aggregate_present():

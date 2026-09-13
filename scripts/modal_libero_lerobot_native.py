@@ -29,6 +29,7 @@ Usage:
     modal run scripts/modal_libero_lerobot_native.py --tasks 0 --num-episodes 1
     modal run scripts/modal_libero_lerobot_native.py --tasks all --num-episodes 5
 """
+import json
 import os
 import subprocess
 import modal
@@ -387,9 +388,17 @@ def run_ported_libero(
 
     # ─── Results struct ──────────────────────────────────────────────
     results = {
+        "schema_version": 1,
         "model": model_id,
+        "revision": revision or None,
+        "checkpoint_kind": "smolvla-lora" if adapter_path else "full",
+        "adapter_path": adapter_path or None,
+        "adapter_base": adapter_base or None,
+        "adapter_base_revision": adapter_base_revision or None,
         "harness": "openpi-port-lerobot-native",
         "suite": task_suite_name,
+        "task_indices": task_indices,
+        "seed": seed,
         "num_episodes_per_task": num_episodes,
         "max_steps": max_steps,
         "resize_size": resize_size,
@@ -713,3 +722,4 @@ def main(
         print(f"  task {task['task_idx']}: "
               f"{task['success']}/{task['total']} — "
               f"{task['task_description'][:60]}")
+    print("TETHER_MODAL_RESULT_JSON=" + json.dumps(r, sort_keys=True, separators=(",", ":")))
