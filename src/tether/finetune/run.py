@@ -140,6 +140,8 @@ def _build_lerobot_command(cfg: FinetuneConfig) -> list[str]:
     # builder. In particular, LeRobot 0.5.1 rejects policy.path + policy.type,
     # while the older pretrained_* spellings are not valid selection flags.
     reserved_policy_args = {
+        "policy.input_features",
+        "policy.output_features",
         "policy.path",
         "policy.type",
         "policy.pretrained_path",
@@ -181,6 +183,11 @@ def _build_lerobot_command(cfg: FinetuneConfig) -> list[str]:
     else:
         # LeRobot 0.5.1 loads both config and weights through policy.path.
         cmd.append(f"--policy.path={cfg.base}")
+        # Foundation checkpoints carry the feature names of their pretraining
+        # embodiment. LeRobot's documented PEFT path clears those fields so it
+        # derives camera, state, and action features from the selected dataset.
+        cmd.append("--policy.input_features=null")
+        cmd.append("--policy.output_features=null")
     if cfg.dataset_revision:
         cmd.append(f"--dataset.revision={cfg.dataset_revision}")
     if is_from_scratch and cfg.chunk_size:

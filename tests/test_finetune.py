@@ -132,6 +132,8 @@ class TestLerobotCommandBuild:
         # upstream, this test catches it.
         joined = " ".join(cmd)
         assert cmd.count("--policy.path=lerobot/smolvla_base") == 1
+        assert cmd.count("--policy.input_features=null") == 1
+        assert cmd.count("--policy.output_features=null") == 1
         assert "--policy.type=" not in joined
         assert "--policy.pretrained_path=" not in joined
         assert "--policy.pretrained_model_path=" not in joined
@@ -176,6 +178,8 @@ class TestLerobotCommandBuild:
 
         assert cmd.count("--policy.type=act") == 1
         assert "--policy.path=" not in joined
+        assert "--policy.input_features=null" not in joined
+        assert "--policy.output_features=null" not in joined
         assert "--policy.pretrained_path=" not in joined
         assert "--policy.pretrained_model_path=" not in joined
 
@@ -183,6 +187,8 @@ class TestLerobotCommandBuild:
         "arg_name",
         [
             "policy.path",
+            "policy.input_features",
+            "policy.output_features",
             "policy.type",
             "policy.pretrained_path",
             "policy.pretrained_model_path",
