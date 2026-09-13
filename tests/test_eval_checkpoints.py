@@ -10,9 +10,10 @@ from tether.eval.modal_runner import run_libero_on_modal
 def test_lora_identity_includes_adapter_files_and_base(tmp_path):
     (tmp_path / "adapter_config.json").write_text('{"base_model_name_or_path":"org/base"}')
     (tmp_path / "adapter_model.safetensors").write_bytes(b"weights")
-    spec = resolve_checkpoint(tmp_path)
+    spec = resolve_checkpoint(tmp_path, base_revision="base-rev")
     assert spec.kind == "smolvla-lora"
     assert spec.base == "org/base"
+    assert spec.base_revision == "base-rev"
     assert spec.identity.startswith("sha256:")
     assert {item["path"] for item in spec.files} == {"adapter_config.json", "adapter_model.safetensors"}
 
@@ -56,7 +57,8 @@ def test_modal_command_names_selected_adapter_and_never_uses_reference(tmp_path)
         captured.append(command)
         return subprocess.CompletedProcess(command, 1, "", "fixture stop")
 
-    spec = resolve_checkpoint("org/candidate", kind="smolvla-lora", base="org/base", revision="adapter-rev")
+    spec = resolve_checkpoint("org/candidate", kind="smolvla-lora", base="org/base", revision="adapter-rev", base_revision="base-rev")
+    assert spec.identity == "hf-lora:org/candidate@adapter-rev+org/base@base-rev"
     run_libero_on_modal(
         config=LiberoSuiteConfig(tasks=("libero_10",), task_indices=(2,), num_episodes=1),
         checkpoint=spec, repo_root=tmp_path, modal_invoker=invoke,
@@ -65,4 +67,5 @@ def test_modal_command_names_selected_adapter_and_never_uses_reference(tmp_path)
     assert command[command.index("--model-id") + 1] == "org/candidate"
     assert command[command.index("--adapter-path") + 1] == "org/candidate"
     assert command[command.index("--adapter-base") + 1] == "org/base"
+    assert command[command.index("--adapter-base-revision") + 1] == "base-rev"
     assert "HuggingFaceVLA/smolvla_libero" not in command

@@ -19,6 +19,7 @@ class CheckpointSpec:
     base: str | None = None
     revision: str | None = None
     files: tuple[dict, ...] = ()
+    base_revision: str | None = None
 
     def to_dict(self) -> dict:
         value = asdict(self)
@@ -49,6 +50,7 @@ def resolve_checkpoint(
     kind: str = "auto",
     base: str | None = None,
     revision: str | None = None,
+    base_revision: str | None = None,
 ) -> CheckpointSpec:
     """Resolve a checkpoint without downloading it or selecting a fallback."""
     raw = str(source)
@@ -69,12 +71,14 @@ def resolve_checkpoint(
                 resolved_base = None
         if detected == "smolvla-lora" and not resolved_base:
             raise CheckpointError("A SmolVLA LoRA adapter requires an explicit base checkpoint.")
+        if detected == "smolvla-lora" and resolved_base and not Path(resolved_base).expanduser().is_dir() and not base_revision:
+            raise CheckpointError("A remote LoRA base requires --adapter-base-revision for reproducible evidence.")
         files = _file_manifest(path)
         if not files:
             raise CheckpointError("The local checkpoint directory contains no files.")
-        identity_input = json.dumps({"kind": detected, "base": resolved_base, "files": files}, sort_keys=True)
+        identity_input = json.dumps({"kind": detected, "base": resolved_base, "base_revision": base_revision, "files": files}, sort_keys=True)
         identity = "sha256:" + hashlib.sha256(identity_input.encode()).hexdigest()
-        return CheckpointSpec(detected, str(path.resolve()), identity, resolved_base, revision, files)
+        return CheckpointSpec(detected, str(path.resolve()), identity, resolved_base, revision, files, base_revision)
 
     if raw.startswith(("/", "./", "../", "~")):
         raise CheckpointError(f"Checkpoint path not found: {raw}")
@@ -82,6 +86,8 @@ def resolve_checkpoint(
     if kind == "smolvla-lora":
         if not base:
             raise CheckpointError("A remote SmolVLA LoRA adapter requires an explicit base checkpoint.")
+        if not Path(base).expanduser().is_dir() and not base_revision:
+            raise CheckpointError("A remote LoRA base requires --adapter-base-revision for reproducible evidence.")
         detected = kind
     else:
         detected = "full"
@@ -90,5 +96,8 @@ def resolve_checkpoint(
         raise CheckpointError(f"Checkpoint path does not exist and is not a Hugging Face repository: {raw}")
     if not revision:
         raise CheckpointError("A Hugging Face checkpoint requires --checkpoint-revision for reproducible evidence.")
-    identity = f"hf:{remote}@{revision}"
-    return CheckpointSpec(detected, remote, identity, base, revision)
+    identity = (
+        f"hf-lora:{remote}@{revision}+{base}@{base_revision}"
+        if detected == "smolvla-lora" else f"hf:{remote}@{revision}"
+    )
+    return CheckpointSpec(detected, remote, identity, base, revision, base_revision=base_revision)

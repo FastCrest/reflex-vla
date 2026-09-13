@@ -215,6 +215,8 @@ def _invoke_one_suite(
         cmd.extend(["--revision", checkpoint.revision])
     if checkpoint.kind == "smolvla-lora":
         cmd.extend(["--adapter-path", checkpoint.source, "--adapter-base", checkpoint.base or ""])
+        if checkpoint.base_revision:
+            cmd.extend(["--adapter-base-revision", checkpoint.base_revision])
     t0 = time.perf_counter()
     completed = modal_invoker(cmd, timeout_s)
     elapsed = time.perf_counter() - t0

@@ -41,10 +41,10 @@ def load_smolvla_checkpoint(spec: CheckpointSpec):
     kwargs = {"revision": spec.revision} if spec.revision else {}
     if spec.kind == "smolvla-lora":
         from peft import PeftModel
-        base_kwargs = {}
+        base_kwargs = {"revision": spec.base_revision} if spec.base_revision else {}
         policy = SmolVLAPolicy.from_pretrained(spec.base, **base_kwargs)
         policy = PeftModel.from_pretrained(policy, load_source)
-        processor_source = snapshot_download(spec.base) if not Path(spec.base).exists() else spec.base
+        processor_source = snapshot_download(spec.base, **base_kwargs) if not Path(spec.base).exists() else spec.base
     elif spec.kind == "full":
         policy = SmolVLAPolicy.from_pretrained(load_source, **kwargs)
         processor_source = snapshot_download(load_source, **kwargs) if not Path(load_source).exists() else load_source

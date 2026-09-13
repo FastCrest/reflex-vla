@@ -171,6 +171,7 @@ def run_ported_libero(
     revision: str = "",
     adapter_path: str = "",
     adapter_base: str = "",
+    adapter_base_revision: str = "",
     snapflow_student: str = "",
     snapflow_onnx: str = "",
     preprocessor_ref: str = "",
@@ -258,9 +259,11 @@ def run_ported_libero(
             if not adapter_base:
                 raise ValueError("A SmolVLA LoRA adapter requires --adapter-base.")
             from peft import PeftModel
-            policy = SmolVLAPolicy.from_pretrained(adapter_base)
-            policy = PeftModel.from_pretrained(policy, adapter_path)
-            repo_dir = snapshot_download(adapter_base)
+            base_kwargs = {"revision": adapter_base_revision} if adapter_base_revision else {}
+            adapter_kwargs = {"revision": revision} if revision else {}
+            policy = SmolVLAPolicy.from_pretrained(adapter_base, **base_kwargs)
+            policy = PeftModel.from_pretrained(policy, adapter_path, **adapter_kwargs)
+            repo_dir = snapshot_download(adapter_base, **base_kwargs)
             detected_type = "smolvla-lora"
         else:
             policy = policy_cls.from_pretrained(model_id, **load_kwargs)
@@ -657,6 +660,7 @@ def main(
     revision: str = "",
     adapter_path: str = "",
     adapter_base: str = "",
+    adapter_base_revision: str = "",
     seed: int = 7,
 ):
     """
@@ -697,6 +701,7 @@ def main(
         revision=revision,
         adapter_path=adapter_path,
         adapter_base=adapter_base,
+        adapter_base_revision=adapter_base_revision,
         seed=seed,
     )
     print("\n=== RESULT ===")

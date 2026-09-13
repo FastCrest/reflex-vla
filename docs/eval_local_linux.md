@@ -33,7 +33,7 @@ $python -m tether.cli eval "$parent" \
   --output evidence/development/parent
 
 $python -m tether.cli eval "$adapter" \
-  --checkpoint-kind smolvla-lora --adapter-base "$parent" \
+  --checkpoint-kind smolvla-lora --adapter-base "$parent" --adapter-base-revision "$revision" \
   --runtime local --tasks "$suite" --task-indices "$tasks" \
   --num-episodes "$episodes" --seed "$seed" \
   --output evidence/development/candidate

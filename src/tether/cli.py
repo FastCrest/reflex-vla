@@ -1440,6 +1440,9 @@ def eval_cmd(
     adapter_base: str = typer.Option(
         "", "--adapter-base", help="Base checkpoint for a SmolVLA LoRA adapter.",
     ),
+    adapter_base_revision: str = typer.Option(
+        "", "--adapter-base-revision", help="Exact revision of a remote LoRA base checkpoint.",
+    ),
     task_indices: str = typer.Option(
         "", "--task-indices", help="Comma-separated LIBERO task indices; empty means all tasks in each selected suite.",
     ),
@@ -1532,6 +1535,7 @@ def eval_cmd(
         checkpoint = resolve_checkpoint(
             export_dir, kind=checkpoint_kind, base=adapter_base or None,
             revision=checkpoint_revision or None,
+            base_revision=adapter_base_revision or None,
         )
     except CheckpointError as exc:
         err_console.print(f"[red]Checkpoint error: {exc}[/red]")
