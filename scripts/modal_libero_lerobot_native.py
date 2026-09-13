@@ -103,6 +103,7 @@ image = (
         "gym",
         "gymnasium",
         "lerobot==0.5.1",
+        "peft",
         "num2words",
         "imageio",  # replay video save (optional)
     )
@@ -167,6 +168,9 @@ def run_ported_libero(
     replan_steps: int = 5,
     num_steps_wait: int = 10,
     seed: int = 7,
+    revision: str = "",
+    adapter_path: str = "",
+    adapter_base: str = "",
     snapflow_student: str = "",
     snapflow_onnx: str = "",
     preprocessor_ref: str = "",
@@ -249,8 +253,18 @@ def run_ported_libero(
             policy_cls = SmolVLAPolicy
             detected_type = "smolvla"
         print(f"[ported] Detected policy type: {detected_type} ({policy_cls.__name__})")
-        policy = policy_cls.from_pretrained(model_id)
-        repo_dir = snapshot_download(model_id)
+        load_kwargs = {"revision": revision} if revision else {}
+        if adapter_path:
+            if not adapter_base:
+                raise ValueError("A SmolVLA LoRA adapter requires --adapter-base.")
+            from peft import PeftModel
+            policy = SmolVLAPolicy.from_pretrained(adapter_base)
+            policy = PeftModel.from_pretrained(policy, adapter_path)
+            repo_dir = snapshot_download(adapter_base)
+            detected_type = "smolvla-lora"
+        else:
+            policy = policy_cls.from_pretrained(model_id, **load_kwargs)
+            repo_dir = snapshot_download(model_id, **load_kwargs)
 
     policy.eval().to("cuda").to(torch.float32)
 
@@ -640,6 +654,10 @@ def main(
     snapflow_onnx: str = "",
     preprocessor_ref: str = "",
     save_video_dir: str = "",
+    revision: str = "",
+    adapter_path: str = "",
+    adapter_base: str = "",
+    seed: int = 7,
 ):
     """
     --num-episodes N          episodes per task (OpenPI default: 50)
@@ -676,6 +694,10 @@ def main(
         snapflow_onnx=snapflow_onnx,
         preprocessor_ref=preprocessor_ref,
         save_video_dir=save_video_dir,
+        revision=revision,
+        adapter_path=adapter_path,
+        adapter_base=adapter_base,
+        seed=seed,
     )
     print("\n=== RESULT ===")
     print(f"  model: {r.get('model')}")

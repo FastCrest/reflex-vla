@@ -97,6 +97,7 @@ class EvalEnvelope:
     env: dict  # EvalEnvironment.to_dict()
     video_paths: tuple[str, ...]
     notes: tuple[str, ...]
+    checkpoint: dict | None = None
 
     def __post_init__(self) -> None:
         if self.schema_version != EVAL_ENVELOPE_SCHEMA_VERSION:
@@ -134,6 +135,7 @@ class EvalEnvelope:
             "env": self.env,
             "video_paths": list(self.video_paths),
             "notes": list(self.notes),
+            "checkpoint": self.checkpoint,
         }
 
     def write_json(self, path: str | Path) -> Path:
@@ -153,6 +155,7 @@ def build_envelope(
     modal_block: dict | None = None,
     video_paths: tuple[str, ...] = (),
     notes: tuple[str, ...] = (),
+    checkpoint: dict | None = None,
 ) -> EvalEnvelope:
     """Compose an EvalEnvelope from the per-Day-1 EvalReport + Day 4
     cost + env blocks.
@@ -210,6 +213,7 @@ def build_envelope(
         env=env.to_dict(),
         video_paths=video_paths,
         notes=notes,
+        checkpoint=checkpoint,
     )
 
 

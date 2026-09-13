@@ -1429,7 +1429,19 @@ def benchmark_cmd(
 @app.command(name="eval")
 def eval_cmd(
     export_dir: str = typer.Argument(
-        help="Path to exported model directory (output of `tether export`)",
+        help="Local checkpoint directory or Hugging Face repository ID.",
+    ),
+    checkpoint_kind: str = typer.Option(
+        "auto", "--checkpoint-kind", help="auto | full | smolvla-lora.",
+    ),
+    checkpoint_revision: str = typer.Option(
+        "", "--checkpoint-revision", help="Required commit revision for Hugging Face checkpoints.",
+    ),
+    adapter_base: str = typer.Option(
+        "", "--adapter-base", help="Base checkpoint for a SmolVLA LoRA adapter.",
+    ),
+    task_indices: str = typer.Option(
+        "", "--task-indices", help="Comma-separated LIBERO task indices; empty means all tasks in each selected suite.",
     ),
     suite: str = typer.Option(
         "libero", "--suite",
@@ -1497,6 +1509,7 @@ def eval_cmd(
     """
     _setup_logging(verbose)
 
+    from tether.eval.checkpoints import CheckpointError, resolve_checkpoint
     from tether.eval.cost_model import (
         COST_PREVIEW_GUARDRAIL_USD,
         estimate_cost,
@@ -1515,10 +1528,15 @@ def eval_cmd(
     )
 
     # ---- Validate inputs at the CLI layer (fail loud) ----
-    export_path = Path(export_dir)
-    if not export_path.exists():
-        err_console.print(f"[red]Export directory not found: {export_dir}[/red]")
+    try:
+        checkpoint = resolve_checkpoint(
+            export_dir, kind=checkpoint_kind, base=adapter_base or None,
+            revision=checkpoint_revision or None,
+        )
+    except CheckpointError as exc:
+        err_console.print(f"[red]Checkpoint error: {exc}[/red]")
         raise typer.Exit(1)
+    export_path = Path(checkpoint.source)
 
     if suite != "libero":
         err_console.print(
@@ -1538,12 +1556,18 @@ def eval_cmd(
     parsed_tasks: tuple[str, ...] = tuple(
         t.strip() for t in tasks.split(",") if t.strip()
     ) if tasks else ()
+    try:
+        parsed_task_indices = tuple(int(value.strip()) for value in task_indices.split(",") if value.strip())
+    except ValueError:
+        err_console.print("[red]Task indices must be comma-separated integers.[/red]")
+        raise typer.Exit(2)
 
     # Build config — validates num_episodes, max_parallel, episode_timeout_s
     try:
         config = LiberoSuiteConfig(
             num_episodes=num_episodes,
             tasks=parsed_tasks,
+            task_indices=parsed_task_indices,
             runtime=runtime,
             video=video,
             output_dir=output,
@@ -1558,6 +1582,7 @@ def eval_cmd(
     # ---- Banner echo ----
     console.print("\n[bold]Tether Eval[/bold]")
     console.print(f"  Export:      {export_dir}")
+    console.print(f"  Checkpoint:  {checkpoint.identity}")
     console.print(f"  Suite:       [cyan]{suite}[/cyan]")
     console.print(f"  Runtime:     [cyan]{runtime}[/cyan]")
     console.print(f"  Episodes:    {num_episodes} per task")
@@ -1635,32 +1660,21 @@ def eval_cmd(
         runtime_config = LiberoSuiteConfig(
             num_episodes=num_episodes,
             tasks=tuple(default_libero_tasks()),
+            task_indices=parsed_task_indices,
             runtime=runtime, video=video, output_dir=output, seed=seed,
             max_parallel=max_parallel, cost_preview=cost_preview,
         )
 
-    if runtime == "modal":
-        from tether.eval.modal_runner import ModalNotInstalledError
-        suite_runner = resolve_suite_runner(
-            runtime=runtime, export_dir=export_path,
-        )
-        try:
-            report = suite_runner(runtime_config, export_path)
-        except ModalNotInstalledError as exc:
-            err_console.print(f"\n[red]{exc}[/red]")
-            raise typer.Exit(6)
-    else:
-        # local
-        task_runner = resolve_task_runner(
-            runtime=runtime, export_dir=export_path,
-        )
-        tasks_provider = None if parsed_tasks else default_libero_tasks
-        report = LiberoSuite.run(
-            export_dir=export_path,
-            config=runtime_config,
-            task_runner=task_runner,
-            tasks_provider=tasks_provider,
-        )
+    from tether.eval.local_runner import LocalEvaluationUnavailable
+    from tether.eval.modal_runner import ModalCheckpointUnavailableError, ModalNotInstalledError
+    suite_runner = resolve_suite_runner(
+        runtime=runtime, export_dir=export_path, checkpoint=checkpoint,
+    )
+    try:
+        report = suite_runner(runtime_config, export_path)
+    except (ModalNotInstalledError, ModalCheckpointUnavailableError, LocalEvaluationUnavailable) as exc:
+        err_console.print(f"\n[red]{exc}[/red]")
+        raise typer.Exit(6)
 
     # ---- Render summary ----
     console.print(
@@ -1707,6 +1721,7 @@ def eval_cmd(
         env=env_block,
         num_episodes_per_task=num_episodes,
         modal_block=modal_block,
+        checkpoint=checkpoint.to_dict(),
     )
     envelope_path = envelope.write_json(output_path / "report.json")
     console.print(f"\n  [dim]JSON envelope:[/dim] {envelope_path}")

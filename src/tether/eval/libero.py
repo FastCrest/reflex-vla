@@ -70,6 +70,7 @@ class LiberoSuiteConfig:
 
     num_episodes: int = DEFAULT_NUM_EPISODES
     tasks: tuple[str, ...] = ()  # empty = all 90 LIBERO tasks
+    task_indices: tuple[int, ...] = ()
     runtime: str = "modal"
     video: bool = False
     output_dir: str = "./eval_output"
@@ -101,6 +102,8 @@ class LiberoSuiteConfig:
                 raise ValueError(
                     f"each task must be a non-empty string, got {task!r}"
                 )
+        if any(index < 0 for index in self.task_indices):
+            raise ValueError("task_indices must contain non-negative integers")
 
 
 @dataclass(frozen=True)
