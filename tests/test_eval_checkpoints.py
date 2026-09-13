@@ -1,9 +1,12 @@
 import pytest
 import subprocess
+import sys
+import types
 
 from tether.eval.checkpoints import CheckpointError, CheckpointSpec, resolve_checkpoint
 from tether.eval.libero import LiberoSuiteConfig
 from tether.eval.local_runner import run_local_libero
+from tether.eval.local_runner import load_smolvla_checkpoint
 from tether.eval.modal_runner import run_libero_on_modal
 
 
@@ -45,6 +48,50 @@ def test_local_runner_passes_exact_cases_and_preserves_real_outcomes():
     assert captured["seed"] == 41
     assert [episode.success for episode in report.results[0].episodes] == [True, False]
     assert report.results[0].episodes[1].n_steps == 220
+
+
+def test_local_lora_loader_forwards_pinned_adapter_and_base_revisions(monkeypatch):
+    calls = {}
+
+    class Policy:
+        @classmethod
+        def from_pretrained(cls, source, **kwargs):
+            calls["base"] = (source, kwargs)
+            return cls()
+
+        def to(self, device):
+            return self
+
+        def eval(self):
+            return self
+
+    class Pipeline:
+        @classmethod
+        def from_pretrained(cls, **kwargs):
+            return cls()
+
+    class Peft:
+        @classmethod
+        def from_pretrained(cls, policy, source, **kwargs):
+            calls["adapter"] = (source, kwargs)
+            return policy
+
+    monkeypatch.setitem(sys.modules, "peft", types.SimpleNamespace(PeftModel=Peft))
+    monkeypatch.setitem(sys.modules, "huggingface_hub", types.SimpleNamespace(snapshot_download=lambda source, **kwargs: "/base"))
+    monkeypatch.setitem(sys.modules, "lerobot.processor.converters", types.SimpleNamespace(
+        batch_to_transition=object(), policy_action_to_transition=object(),
+        transition_to_batch=object(), transition_to_policy_action=object(),
+    ))
+    monkeypatch.setitem(sys.modules, "lerobot.processor.pipeline", types.SimpleNamespace(PolicyProcessorPipeline=Pipeline))
+    monkeypatch.setitem(sys.modules, "lerobot.policies.smolvla.modeling_smolvla", types.SimpleNamespace(SmolVLAPolicy=Policy))
+
+    spec = CheckpointSpec(
+        "smolvla-lora", "org/adapter", "hf-lora:org/adapter@adapter-rev+org/base@base-rev",
+        revision="adapter-rev", base="org/base", base_revision="base-rev",
+    )
+    load_smolvla_checkpoint(spec)
+    assert calls["base"] == ("org/base", {"revision": "base-rev"})
+    assert calls["adapter"] == ("org/adapter", {"revision": "adapter-rev"})
 
 
 def test_modal_command_names_selected_adapter_and_never_uses_reference(tmp_path):
