@@ -9,6 +9,7 @@ Goal: fine-tuning-pipeline (weight 5).
 from __future__ import annotations
 
 from pathlib import Path
+import json
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -25,7 +26,9 @@ class TestConfigValidation:
     def test_minimal_valid_config(self, tmp_path):
         cfg = FinetuneConfig(
             base="lerobot/smolvla_base",
+            base_revision="base-sha",
             dataset="lerobot/libero",
+            dataset_revision="dataset-sha",
             output=tmp_path,
         )
         assert _validate_config(cfg) == []
@@ -44,7 +47,9 @@ class TestConfigValidation:
     def test_zero_steps_rejected(self, tmp_path):
         cfg = FinetuneConfig(
             base="lerobot/smolvla_base",
+            base_revision="base-sha",
             dataset="lerobot/libero",
+            dataset_revision="dataset-sha",
             output=tmp_path,
             num_steps=0,
         )
@@ -110,7 +115,9 @@ class TestLerobotCommandBuild:
     def test_basic_command_shape(self, tmp_path):
         cfg = FinetuneConfig(
             base="lerobot/smolvla_base",
+            base_revision="base-sha",
             dataset="lerobot/libero",
+            dataset_revision="dataset-sha",
             output=tmp_path,
             num_steps=5000,
             batch_size=16,
@@ -131,6 +138,7 @@ class TestLerobotCommandBuild:
         assert "--policy.repo_id=" in joined
         assert "--policy.push_to_hub=false" in joined
         assert "--dataset.repo_id=lerobot/libero" in joined
+        assert "--dataset.revision=dataset-sha" in joined
         assert "--steps=5000" in joined
         assert "--batch_size=16" in joined
         assert "--optimizer.lr=0.0002" in joined
@@ -339,6 +347,35 @@ class TestRunFinetuneOrchestration:
         assert result.status == "ok"
         assert result.onnx_path is None
         auto_export_mock.assert_not_called()
+
+    def test_pinned_remote_sources_are_resolved_and_recorded(self, tmp_path):
+        cfg = self._cfg(
+            tmp_path,
+            base_revision="base-sha",
+            dataset_revision="dataset-sha",
+            skip_export=True,
+        )
+        resolved = tmp_path / "cache" / "base-sha"
+        resolved.mkdir(parents=True)
+        captured = {}
+
+        def _fake_train(resolved_cfg, log_path, **kwargs):
+            captured["cfg"] = resolved_cfg
+            self._setup_fake_checkpoint(resolved_cfg.output)
+            return 0
+
+        with patch("huggingface_hub.snapshot_download", return_value=str(resolved)) as download, \
+             patch("tether.finetune.run._run_lerobot_training", side_effect=_fake_train):
+            result = run_finetune(cfg)
+
+        assert result.status == "ok"
+        download.assert_called_once_with("lerobot/smolvla_base", revision="base-sha")
+        assert captured["cfg"].base == str(resolved)
+        assert captured["cfg"].dataset_revision == "dataset-sha"
+        receipt = json.loads((tmp_path / "training-source.json").read_text())
+        assert receipt["repository"] == "lerobot/smolvla_base"
+        assert receipt["revision"] == "base-sha"
+        assert receipt["dataset_revision"] == "dataset-sha"
 
 
 class TestCliWiring:

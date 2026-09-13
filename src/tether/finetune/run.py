@@ -14,8 +14,10 @@ registry. See architecture doc Section D for the full target shape.
 from __future__ import annotations
 
 import logging
+import json
 import subprocess
 import time
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -179,6 +181,8 @@ def _build_lerobot_command(cfg: FinetuneConfig) -> list[str]:
     else:
         # LeRobot 0.5.1 loads both config and weights through policy.path.
         cmd.append(f"--policy.path={cfg.base}")
+    if cfg.dataset_revision:
+        cmd.append(f"--dataset.revision={cfg.dataset_revision}")
     if is_from_scratch and cfg.chunk_size:
         # ACT (and similar chunked policies) need chunk_size; pretrained bases
         # bake this in. auto_soarm convention (per its train.py): set
@@ -412,6 +416,24 @@ def run_finetune(cfg: FinetuneConfig, *, hooks=None) -> FinetuneResult:
                 output_dir=cfg.output,
                 error=None,
             )
+
+    if cfg.base_revision and cfg.base and not Path(cfg.base).expanduser().exists():
+        from huggingface_hub import snapshot_download
+
+        source = cfg.base
+        resolved = snapshot_download(source, revision=cfg.base_revision)
+        provenance = {
+            "schema": 1,
+            "repository": source,
+            "revision": cfg.base_revision,
+            "resolved_path": resolved,
+            "dataset_repository": cfg.dataset,
+            "dataset_revision": cfg.dataset_revision,
+        }
+        (cfg.output / "training-source.json").write_text(
+            json.dumps(provenance, indent=2) + "\n"
+        )
+        cfg = replace(cfg, base=resolved)
 
     logger.info("[finetune] start: phase=%s base=%s dataset=%s output=%s steps=%d",
                 cfg.phase, cfg.base, cfg.dataset, cfg.output, cfg.num_steps)

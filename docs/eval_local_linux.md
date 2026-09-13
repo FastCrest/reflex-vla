@@ -13,6 +13,23 @@ Run `scripts/setup_libero_eval_linux.sh`. On Debian or Ubuntu it installs the re
 
 On another Linux distribution, install equivalents for `build-essential`, `cmake`, `ffmpeg`, `git`, `libegl1`, `libgl1`, `libglib2.0-0`, `libglvnd0`, `libosmesa6` and `libosmesa6-dev` before running the script.
 
+For the September 2026 qualification run, pin the public inputs to these measured revisions:
+
+```bash
+parent=lerobot/smolvla_base
+parent_revision=c83c3163b8ca9b7e67c509fffd9121e66cb96205
+dataset=lerobot/libero
+dataset_revision=a1aaacb7f6cd6ee5fb43120f673cebb0cfea7dd4
+
+.venv-eval-linux/bin/python -m tether.cli train finetune \
+  --base "$parent" --base-revision "$parent_revision" \
+  --dataset "$dataset" --dataset-revision "$dataset_revision" \
+  --output evidence/training --steps 5 --batch-size 1 \
+  --lora-rank 8 --mode lora --precision bf16 --skip-export
+```
+
+Five steps are a loader and evidence smoke test, not a useful adaptation claim. Tether downloads the named base revision before training, passes the dataset revision to LeRobot, and writes `training-source.json`. Keep that receipt with the adapter checkpoint and evaluation reports.
+
 ## End-to-end smoke test
 
 Use an exact parent revision and the adapter directory produced by `tether finetune`:
@@ -26,7 +43,7 @@ tasks=0
 episodes=1
 seed=7001
 parent=lerobot/smolvla_base
-revision=<exact-hugging-face-commit>
+revision=c83c3163b8ca9b7e67c509fffd9121e66cb96205
 adapter=/absolute/path/to/checkpoints/<step>/pretrained_model
 
 $python -m tether.cli eval "$parent" \

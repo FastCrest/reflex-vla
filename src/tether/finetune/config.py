@@ -30,6 +30,12 @@ class FinetuneConfig:
     """Output directory. Will contain model.onnx + VERIFICATION.md after
     successful run."""
 
+    base_revision: str | None = None
+    """Exact Hugging Face revision for a remote base checkpoint."""
+
+    dataset_revision: str | None = None
+    """Exact Hugging Face dataset revision passed to LeRobot."""
+
     num_steps: int = 20_000
     """Total training steps. For SmolVLA LoRA, 2-20k is typical depending
     on dataset size."""
